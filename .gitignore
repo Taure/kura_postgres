@@ -1,0 +1,8 @@
+_build/
+*.beam
+*.crashdump
+.rebar3/
+rebar3.crashdump
+erl_crash.dump
+.tool-versions
+CLAUDE.md

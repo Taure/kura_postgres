@@ -1,0 +1,15 @@
+{application, kura_postgres, [
+    {description, "PostgreSQL backend for kura"},
+    {vsn, "git"},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        pgo,
+        kura
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/Taure/kura_postgres"}]}
+]}.
