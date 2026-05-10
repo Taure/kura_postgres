@@ -1,53 +1,46 @@
 # kura_postgres
 
-PostgreSQL backend for [kura](https://github.com/Taure/kura).
-
-Provides `kura_pool_pgo`, `kura_driver_pgo`, `kura_dialect_pg`, and
-`kura_backend_postgres` so kura applications can target PostgreSQL via
-the [pgo](https://hex.pm/packages/pgo) driver.
+PostgreSQL backend for [kura](https://github.com/Taure/kura). Provides
+`kura_pool_pgo`, `kura_driver_pgo`, and `kura_backend_postgres` on top
+of the [pgo](https://hex.pm/packages/pgo) driver. The shared SQL emitter
+(`kura_dialect_pg`) lives in kura core.
 
 ## Use
 
-Add `kura` and `kura_postgres` to your `rebar.config`:
-
 ```erlang
 {deps, [
-    {kura, "~> 2.0"},
-    {kura_postgres, "~> 0.1"}
+    {kura, "~> 2.4"},
+    {kura_postgres, "~> 0.4"}
 ]}.
 ```
 
-Configure your repo to use the PostgreSQL backend:
+Point kura at the backend in `sys.config`:
 
 ```erlang
-{my_app, [
-    {repo, [
-        {backend, kura_backend_postgres},
-        {host, "localhost"},
-        {database, "myapp"},
-        {user, "postgres"},
-        {pool_size, 10}
-    ]}
-]}.
+[{kura, [
+    {repo, my_repo},
+    {backend, kura_backend_postgres},
+    {host, "localhost"},
+    {port, 5432},
+    {database, "my_app"},
+    {user, "postgres"},
+    {password, "postgres"},
+    {pool_size, 10}
+]}].
 ```
 
-## Status
+`kura_app:start/2` resolves the aggregator and auto-populates `dialect`,
+`pool_module`, and `driver_module`. Per-key overrides still win.
 
-The PostgreSQL surface kura has always supported (SELECT / INSERT /
-UPDATE / DELETE / WHERE / ORDER / LIMIT / RETURNING / ON CONFLICT /
-JOIN / CTE / UNION / advisory locks / LISTEN/NOTIFY) lives here.
+## Capabilities
 
-Capability set declared by `kura_pool_pgo`:
+`kura_pool_pgo:capabilities/0`:
 
 ```
 [returning, jsonb, arrays, advisory_locks, listen_notify,
  select_for_update_skip_locked, partial_indexes, transactions,
  savepoints, prepared_statements]
 ```
-
-Until kura 2.0 ships with the PG modules removed, these same modules
-are also present in the kura repo. The package split is formalized at
-the 2.0 cut.
 
 ## License
 
