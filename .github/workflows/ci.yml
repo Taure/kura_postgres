@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.0.5
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      version-file: '.tool-versions'
+      enable-ct: true
+      enable-ex-doc: true
+      enable-hank: true
+      enable-sheldon: false
+      enable-audit: false
+      enable-coverage: true
+      enable-sbom: true
+      enable-sbom-scan: true
+      enable-dependency-submission: true
+      enable-summary: true
+      enable-mutate: false
+      enable-elp-lint: true
+      enable-elp-eqwalize: false
+
+      extra-services-compose: 'docker-compose.ci.yml'
