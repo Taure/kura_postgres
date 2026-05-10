@@ -59,8 +59,12 @@ ensure_database(Config) ->
         error ->
             ok;
         {ok, DbName} ->
-            do_ensure_database(Config, binary_to_list(DbName))
+            do_ensure_database(Config, to_list(DbName))
     end.
+
+-spec to_list(binary() | string()) -> string().
+to_list(B) when is_binary(B) -> binary_to_list(B);
+to_list(L) when is_list(L) -> L.
 
 -spec probe_pool(kura_pool:name()) -> ok | {error, term()}.
 probe_pool(Pool) ->
@@ -88,14 +92,23 @@ do_ensure_database(Config, Database) ->
 
 base_pool_config(Config, Database) ->
     #{
-        host => binary_to_list(maps:get(hostname, Config, ~"localhost")),
+        host => to_list(get_first([host, hostname], Config, ~"localhost")),
         port => maps:get(port, Config, 5432),
         database => Database,
-        user => binary_to_list(maps:get(username, Config, ~"postgres")),
-        password => binary_to_list(maps:get(password, Config, <<>>)),
+        user => to_list(get_first([user, username], Config, ~"postgres")),
+        password => to_list(maps:get(password, Config, <<>>)),
         pool_size => 1,
         decode_opts => ?DEFAULT_DECODE_OPTS
     }.
+
+-spec get_first([atom()], map(), binary() | string()) -> binary() | string().
+get_first([], _Config, Default) ->
+    Default;
+get_first([K | Rest], Config, Default) ->
+    case maps:find(K, Config) of
+        {ok, V} when is_binary(V); is_list(V) -> V;
+        _ -> get_first(Rest, Config, Default)
+    end.
 
 apply_pool_extras(Base) ->
     WithSocket =
