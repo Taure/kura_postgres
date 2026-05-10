@@ -2,7 +2,7 @@
 [{<<"backoff">>,{pkg,<<"backoff">>,<<"1.1.6">>},1},
  {<<"kura">>,
   {git,"https://github.com/Taure/kura.git",
-       {ref,"622a3c0e97999cd03de7c5960bb097ccdd64090b"}},
+       {ref,"3c5fe6eb53265843ed415f99cbc1ac10cdf7b493"}},
   0},
  {<<"opentelemetry_api">>,{pkg,<<"opentelemetry_api">>,<<"1.5.0">>},1},
  {<<"pg_types">>,{pkg,<<"pg_types">>,<<"0.6.0">>},1},
