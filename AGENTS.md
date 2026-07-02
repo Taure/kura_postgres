@@ -62,9 +62,13 @@ rebar3 ex_doc               # fix every new warning
 
 Run before every push, all green:
 
-`fmt --check` -> `xref` -> `dialyzer` -> `elp eqwalize-all` -> `elp lint` ->
-`eunit` -> `ex_doc`. `rebar3 fmt` is mandatory before any commit/push. Bring the
-Docker Postgres up first or the driver/pool suites cannot run.
+`rebar3 fmt` -> `rebar3 xref` -> `rebar3 dialyzer` -> `rebar3 lint` ->
+`rebar3 hank` -> `rebar3 eunit` -> `rebar3 ct` -> `rebar3 ex_doc` ->
+`rebar3 fmt --check`. Bring the Docker Postgres up first or the driver/pool
+suites cannot run.
+
+CI (Taure/erlang-ci) additionally runs coverage + sbom; eqwalize/mutate are
+disabled here.
 
 ## Conventions
 
