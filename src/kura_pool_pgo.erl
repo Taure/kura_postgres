@@ -27,7 +27,7 @@ Pool options are passed through to pgo verbatim. Common keys:
 }
 ```
 
-See `pgo:pool_config/0` for the full list.
+See the [pgo pool options](https://hexdocs.pm/pgo) for the full list.
 """.
 
 -behaviour(kura_pool).

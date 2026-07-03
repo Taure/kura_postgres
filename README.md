@@ -29,7 +29,7 @@ Point kura at the backend in `sys.config`:
 ]}].
 ```
 
-`kura_app:start/2` resolves the aggregator and auto-populates `dialect`,
+On application start, Kura resolves the aggregator and auto-populates `dialect`,
 `pool_module`, and `driver_module`. Per-key overrides still win.
 
 ## Capabilities
