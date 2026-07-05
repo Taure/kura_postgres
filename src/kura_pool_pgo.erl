@@ -54,6 +54,7 @@ capabilities() ->
         partial_indexes,
         window_functions,
         full_text_search,
+        vector,
         transactions,
         savepoints,
         prepared_statements
