@@ -63,6 +63,7 @@ capabilities_set() ->
                 select_for_update_skip_locked,
                 partial_indexes,
                 window_functions,
+                full_text_search,
                 transactions,
                 savepoints,
                 prepared_statements
