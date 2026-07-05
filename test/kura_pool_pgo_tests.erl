@@ -62,6 +62,7 @@ capabilities_set() ->
                 listen_notify,
                 select_for_update_skip_locked,
                 partial_indexes,
+                window_functions,
                 transactions,
                 savepoints,
                 prepared_statements
