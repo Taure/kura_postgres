@@ -285,7 +285,7 @@ insert_test() ->
 
 update_test() ->
     {SQL, Params} = kura_dialect_pg:update(
-        kura_test_schema, [name], #{name => <<"Bob">>}, {id, 1}
+        kura_test_schema, [name], #{name => <<"Bob">>}, [{id, 1}]
     ),
     ?assertEqual(<<"UPDATE \"users\" SET \"name\" = $1 WHERE \"id\" = $2 RETURNING *">>, SQL),
     ?assertEqual([<<"Bob">>, 1], Params).
@@ -295,7 +295,7 @@ update_test() ->
 %%----------------------------------------------------------------------
 
 delete_test() ->
-    {SQL, Params} = kura_dialect_pg:delete(kura_test_schema, id, 1),
+    {SQL, Params} = kura_dialect_pg:delete(kura_test_schema, [{id, 1}]),
     ?assertEqual(<<"DELETE FROM \"users\" WHERE \"id\" = $1 RETURNING *">>, SQL),
     ?assertEqual([1], Params).
 
