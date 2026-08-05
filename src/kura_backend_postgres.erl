@@ -13,10 +13,13 @@ PostgreSQL backend aggregator. One config knob for users:
 
 The aggregator wires up:
 
-- `pool_module` -> `kura_pool_pgo`
-- `driver_module` -> `kura_driver_pgo`
+- `pool_module` -> `kura_pool_minato`
+- `driver_module` -> `kura_driver_minato`
 - `dialect` -> `kura_dialect_pg`
-- `capabilities` -> declared on `kura_pool_pgo`
+- `capabilities` -> declared on `kura_pool_minato`
+
+`kura_pool_pgo` and `kura_driver_pgo` are still here and still work; a repo that
+wants them says so with `pool_module` and `driver_module` of its own.
 """.
 
 -export([
@@ -27,14 +30,14 @@ The aggregator wires up:
 ]).
 
 -spec pool_module() -> module().
-pool_module() -> kura_pool_pgo.
+pool_module() -> kura_pool_minato.
 
 -spec driver_module() -> module().
-driver_module() -> kura_driver_pgo.
+driver_module() -> kura_driver_minato.
 
 -spec dialect() -> module().
 dialect() -> kura_dialect_pg.
 
--doc "Forwards to `kura_pool_pgo:capabilities/0`.".
+-doc "Forwards to `kura_pool_minato:capabilities/0`.".
 -spec capabilities() -> kura_capabilities:capability_set().
-capabilities() -> kura_pool_pgo:capabilities().
+capabilities() -> kura_pool_minato:capabilities().
