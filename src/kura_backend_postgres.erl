@@ -18,8 +18,8 @@ The aggregator wires up:
 - `dialect` -> `kura_dialect_pg`
 - `capabilities` -> declared on `kura_pool_minato`
 
-`kura_pool_pgo` and `kura_driver_pgo` are still here and still work; a repo that
-wants them says so with `pool_module` and `driver_module` of its own.
+A repo that wants something else says so with `pool_module` and `driver_module`
+of its own; nothing here stops it.
 """.
 
 -export([

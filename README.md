@@ -1,8 +1,8 @@
 # kura_postgres
 
 PostgreSQL backend for [kura](https://github.com/Taure/kura). Provides
-`kura_pool_pgo`, `kura_driver_pgo`, and `kura_backend_postgres` on top
-of the [pgo](https://hex.pm/packages/pgo) driver. The shared SQL emitter
+`kura_pool_minato`, `kura_driver_minato`, and `kura_backend_postgres` on top
+of the [minato](https://hex.pm/packages/minato) client. The shared SQL emitter
 (`kura_dialect_pg`) lives in kura core.
 
 ## Use
@@ -34,7 +34,7 @@ On application start, Kura resolves the aggregator and auto-populates `dialect`,
 
 ## Capabilities
 
-`kura_pool_pgo:capabilities/0`:
+`kura_pool_minato:capabilities/0`:
 
 ```
 [returning, jsonb, arrays, advisory_locks, listen_notify,
