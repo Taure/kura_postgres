@@ -3,7 +3,7 @@
 Working agreement for agents and contributors on **kura_postgres** - the
 PostgreSQL backend adapter for the [kura](https://github.com/Taure/kura) data
 layer. A thin OTP library: it implements kura's driver/pool/backend behaviours
-on top of the [pgo](https://hex.pm/packages/pgo) driver and nothing more.
+on top of the [minato](https://hex.pm/packages/minato) client and nothing more.
 
 ## What this is
 
@@ -12,12 +12,13 @@ kura v2 is multi-backend: **kura** (core, backend-agnostic) + **kura_postgres**
 modules and their behaviour implementations:
 
 - `kura_backend_postgres` - the aggregator. One config knob
-  (`{backend, kura_backend_postgres}`) resolves `pool_module => kura_pool_pgo`,
-  `driver_module => kura_driver_pgo`, `dialect => kura_dialect_pg`.
-- `kura_pool_pgo` - the `kura_pool` + `kura_capabilities` implementation.
-  Wraps pgo's ETS-holder pool; `give_away/3` transfers the per-conn holder for
-  sandbox test fixtures.
-- `kura_driver_pgo` - the `kura_driver` implementation. Wraps pgo `query`/
+  (`{backend, kura_backend_postgres}`) resolves `pool_module => kura_pool_minato`,
+  `driver_module => kura_driver_minato`, `dialect => kura_dialect_pg`.
+- `kura_pool_minato` - the `kura_pool` + `kura_capabilities` implementation.
+  A checkout spawns a holder process that owns the connection, because a minato
+  connection belongs to the process that borrowed it; `give_away/3` moves the
+  watch rather than the socket, for sandbox test fixtures.
+- `kura_driver_minato` - the `kura_driver` implementation. Wraps minato `query`/
   `transaction`, plus optional `ensure_database/1` and `probe_pool/1` callbacks.
 
 The SQL emitter (`kura_dialect_pg`) lives in **kura core**, NOT here (it was
@@ -27,22 +28,22 @@ exercise that shared emitter against real Postgres.
 
 ## Scope - what belongs here
 
-- **In:** the pgo-backed pool, driver, and backend aggregator; the pgo
+- **In:** the minato-backed pool, driver, and backend aggregator; the
   transaction/checkout conventions; `ensure_database`/`probe_pool`; the
-  capability set; type/UUID round-trip config that is pgo-specific.
+  capability set; type/UUID round-trip config that is client-specific.
 - **Out:** the query AST, compiler, changeset, migrator, repo, types, and the
   `kura_dialect_pg` emitter - all core. Any generic data-layer primitive
   belongs upstream in kura, not in one backend adapter.
 - **Out forever:** anything that warps this into more than a driver shim, or
   any feature driven by a single consumer (asobi, shigoto, Trana, an app). If
-  a change is not pgo-specific, it belongs in kura core.
+  a change is not specific to this client, it belongs in kura core.
 
 The driver-agnostic backend boundary is load-bearing. Any change to a behaviour
-callback, the pool/driver API, the capability set, or the pgo dep goes past the
+callback, the pool/driver API, the capability set, or the minato dep goes past the
 **`kura-architecture-guardian`** (it covers the whole kura ecosystem). Its first
-question on a driver swap is "show me the bench" - pgo was measured against
-epgsql+hnc and won (0 gen_server hops on the hot path); do not propose a swap
-without a shigoto-shaped benchmark.
+question on a driver swap is "show me the bench" - minato was measured against
+pgo, epgsql and two JavaScript clients before it replaced them here; do not
+propose a swap without a comparable benchmark.
 
 ## Commands
 
@@ -93,21 +94,21 @@ kura core (backend-agnostic)
         | this repo implements:
         v
   kura_backend_postgres   aggregator -> pool/driver/dialect
-  kura_pool_pgo           kura_pool + kura_capabilities  -> pgo_pool (ETS holder)
-  kura_driver_pgo         kura_driver                    -> pgo:query/transaction
+  kura_pool_minato        kura_pool + kura_capabilities  -> minato_pool (holder proc)
+  kura_driver_minato      kura_driver                    -> minato_query/minato_txn
 ```
 
 Hot path: a caller leases a conn via `kura_pool:with_conn/3` and drives
-`pgo:query/4` itself (caller-driven socket I/O, no pool gen_server hop). Inside
-a pgo transaction, `kura_driver_pgo:query/5` detects the `pgo_transaction_connection`
-process-dict key and routes to the tx conn instead.
+`minato_query` itself (caller-driven socket I/O, no pool gen_server hop). Inside
+a transaction, `kura_driver_minato:query/5` finds the transaction's holder in the
+process dictionary and routes to it instead.
 
 ### Pool boot order (the #1 gotcha)
 
-kura starts its pgo pool **at kura-app boot** from config, before the consuming
+kura starts its pool **at kura-app boot** from config, before the consuming
 app starts. An app that does `application:set_env(kura, host, ...)` in its own
 `start/2` sets it too late - the pool already dialed the boot-time host and does
-not move. Symptom: pgo loops on `econnrefused`/`nxdomain` and
+not move. Symptom: the pool loops on `econnrefused`/`nxdomain` and
 `kura_migrator:migrate` returns `{error, none_available}`, so migrations fail
 silently. Fix: the real DB host must be in kura's config at boot (use
 `RELX_REPLACE_OS_VARS` on `sys.config.src` in prod; keep `{port, 5432}` static).
@@ -120,20 +121,21 @@ silently. Fix: the real DB host must be in kura's config at boot (use
   `{repos, #{Name => #{backend => kura_backend_postgres, ...}}}` map form. CI
   only boots dev config, so prod-config drift ships silently - verify BOTH.
 - **Config keys are `host`/`user`, not `hostname`/`username`.** The repo map is
-  passed verbatim to pgo, which ignores unknown keys and silently defaults
-  `host` to localhost. Symptom: pool stuck `none_available`, migration bails
-  before any DDL. Grep any kura+pgo app for `hostname =>`/`username =>`.
+  passed verbatim to the client, which ignores unknown keys and silently
+  defaults `host` to localhost. Symptom: pool stuck `none_available`, migration
+  bails before any DDL. Grep any kura app for `hostname =>`/`username =>`.
 - **`string` = VARCHAR(255), `text` = unbounded.** Picking `string` for
   arbitrary-length data crashes inserts with `value too long for type character
   varying(255)`. Use `text` for anything unbounded.
-- **UUID format.** Set `{pg_types, [{uuid_format, string}]}` in sys.config to
-  get readable UUID strings from pgo instead of raw 16-byte binaries.
+- **UUID format.** minato decodes a `uuid` to its string form by default, so
+  nothing needs configuring. A repo that wants the raw 16 bytes passes
+  `uuid_format => binary` in its query options.
 
 ## Tests
 
 `test/` runs against a real Postgres (host port **5555**, db `kura_test`, user
 `postgres`, password `root`; see `docker-compose.yml`). Suites:
-`kura_driver_pgo_tests`, `kura_pool_pgo_tests` (pool + capability set), and
+`kura_driver_minato_tests`, `kura_pool_minato_tests` (pool + capability set), and
 `kura_dialect_pg_tests` (the shared core emitter). `kura_test_schema` /
 `kura_test_post_schema` are fixtures. CI brings up `docker-compose.ci.yml`
 (tmpfs Postgres) via `extra-services-compose`.

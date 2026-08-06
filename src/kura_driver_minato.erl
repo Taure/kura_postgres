@@ -10,9 +10,9 @@ is held and nothing is threaded through kura.
 
 Inside a transaction it goes to the connection the transaction is running on,
 which `m:kura_pool_minato` holds and this module finds in the process
-dictionary. That is the same convention the pgo driver used, for the same
-reason: a query written inside `transaction/4`'s function is handed nothing, so
-the connection has to be found rather than passed.
+dictionary. The reason is that a query written inside `transaction/4`'s
+function is handed nothing, so the connection has to be found rather than
+passed.
 
 ## Results and errors
 
