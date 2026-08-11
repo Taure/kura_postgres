@@ -34,7 +34,7 @@ with_pool_test_() ->
 transport_survives_translation_test() ->
     Name = kura_pool_minato_transport_test,
     Config = ?CONFIG,
-    Opts = Config#{transport => inet, socket_options => [{send_timeout, 5000}]},
+    Opts = Config#{transport => inet, socket_options => [{priority, 3}]},
     {ok, _Pid} = kura_pool_minato:start_pool(Name, Opts),
     ?assertEqual(ok, wait_for_ready(Name, 5000)),
     _ = kura_pool_minato:stop_pool(Name),
