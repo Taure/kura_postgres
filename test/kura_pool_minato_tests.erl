@@ -25,6 +25,21 @@ with_pool_test_() ->
         ]
     end}.
 
+%% `transport` decides which of minato's two transports a connection opens on,
+%% and minato documents `inet` as the way back from its default. That is only
+%% true if the option survives translation, and this file's own catch-all used
+%% to drop it. Asserted through behaviour rather than by reading the option
+%% back: `send_timeout` is a driver option the socket transport refuses at
+%% connect, so a pool that becomes ready with it set is a pool that got `inet`.
+transport_survives_translation_test() ->
+    Name = kura_pool_minato_transport_test,
+    Config = ?CONFIG,
+    Opts = Config#{transport => inet, socket_options => [{send_timeout, 5000}]},
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, Opts),
+    ?assertEqual(ok, wait_for_ready(Name, 5000)),
+    _ = kura_pool_minato:stop_pool(Name),
+    ok.
+
 setup() ->
     application:ensure_all_started(minato),
     application:ensure_all_started(kura),
