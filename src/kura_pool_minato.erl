@@ -68,6 +68,10 @@ kura's options are translated to minato's: `pool_size` becomes `size`, and the
 connection settings are gathered under `connection`. `host`, `user`, `password`
 and `database` are accepted as strings or binaries, because kura configuration
 in the wild is written both ways.
+
+`transport` is passed through. minato chooses one by default and documents the
+other as the way back from that choice, which is only true from here if the
+option survives the translation.
 """.
 -spec start_pool(kura_pool:name(), kura_pool:opts()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Opts) ->
@@ -240,6 +244,7 @@ connection(queue_target, _Value, Connection) -> Connection;
 connection(queue_interval, _Value, Connection) -> Connection;
 connection(connect_timeout, Value, Connection) -> Connection#{connect_timeout => Value};
 connection(timeout, Value, Connection) -> Connection#{timeout => Value};
+connection(transport, Value, Connection) -> Connection#{transport => Value};
 connection(_Key, _Value, Connection) -> Connection.
 
 -spec password(term()) -> binary() | fun(() -> binary()).
