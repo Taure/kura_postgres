@@ -75,13 +75,19 @@ dictionary.
 Raises `error(transaction_rolled_back)` when the server answers the `COMMIT`
 with `ROLLBACK`, which it does when the transaction had already failed. Nothing
 was written, and returning the function's value there would report success for
-work the server threw away.
+work the server threw away. A `COMMIT` that fails outright raises
+`error({kura_driver_minato, {commit_failed, Reason}})` for the same reason.
+
+Called inside a transaction on the same pool, it runs `Fun` on that
+transaction's connection under a `SAVEPOINT`: a normal return releases it, and
+an exception rolls back to it and is re-raised, leaving the work before it in
+place. A nested transaction therefore commits only with the outer one.
 """.
 -spec transaction(module(), kura_pool:name(), fun(() -> term()), map()) -> term().
 transaction(_PoolMod, Pool, Fun, _Opts) ->
-    case kura_pool_minato:checkout(Pool, #{}) of
-        {ok, Holder, _Token} -> inside(Pool, Holder, Fun);
-        {error, Reason} -> error({kura_driver_minato, {no_connection, Reason}})
+    case kura_pool_minato:transaction_conn(Pool) of
+        undefined -> outermost(Pool, Fun);
+        Holder -> nested(Holder, Fun)
     end.
 
 -doc "Create the database named in `Config` if it is not there.".
@@ -101,11 +107,18 @@ probe_pool(Pool) ->
 %% Transactions
 %%----------------------------------------------------------------------
 
+-spec outermost(kura_pool:name(), fun(() -> term())) -> term().
+outermost(Pool, Fun) ->
+    case kura_pool_minato:checkout(Pool, #{}) of
+        {ok, Holder, _Token} -> inside(Pool, Holder, Fun);
+        {error, Reason} -> error({kura_driver_minato, {no_connection, Reason}})
+    end.
+
 -spec inside(kura_pool:name(), pid(), fun(() -> term())) -> term().
 inside(Pool, Holder, Fun) ->
     ok = kura_pool_minato:in_transaction(Pool, Holder),
     try
-        _ = statement(Holder, ~"BEGIN"),
+        ok = expect(statement(Holder, ~"BEGIN"), 'begin'),
         Value = Fun(),
         committed(Holder, Value)
     catch
@@ -120,9 +133,40 @@ inside(Pool, Holder, Fun) ->
 -spec committed(pid(), term()) -> term().
 committed(Holder, Value) ->
     case statement(Holder, ~"COMMIT") of
+        #{command := commit} -> Value;
         #{command := rollback} -> error(transaction_rolled_back);
-        _Committed -> Value
+        {error, Reason} -> error({kura_driver_minato, {commit_failed, Reason}})
     end.
+
+-spec nested(pid(), fun(() -> term())) -> term().
+nested(Holder, Fun) ->
+    Savepoint = savepoint_name(),
+    ok = expect(statement(Holder, <<"SAVEPOINT ", Savepoint/binary>>), savepoint),
+    try
+        Value = Fun(),
+        released(Holder, Savepoint, Value)
+    catch
+        Class:Reason:Stacktrace ->
+            _ = statement(Holder, <<"ROLLBACK TO SAVEPOINT ", Savepoint/binary>>),
+            erlang:raise(Class, Reason, Stacktrace)
+    end.
+
+%% A RELEASE fails when a statement inside the savepoint failed and left the
+%% transaction aborted, so the work is gone and the caller must not see success.
+-spec released(pid(), binary(), term()) -> term().
+released(Holder, Savepoint, Value) ->
+    case statement(Holder, <<"RELEASE SAVEPOINT ", Savepoint/binary>>) of
+        #{command := release} -> Value;
+        _Failed -> error(transaction_rolled_back)
+    end.
+
+-spec savepoint_name() -> binary().
+savepoint_name() ->
+    <<"kura_savepoint_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
+
+-spec expect(dynamic(), atom()) -> ok.
+expect(#{command := Command}, Command) -> ok;
+expect(Answer, Command) -> error({kura_driver_minato, {Command, Answer}}).
 
 -spec statement(pid(), binary()) -> dynamic().
 statement(Holder, SQL) ->
