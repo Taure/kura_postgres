@@ -20,27 +20,28 @@ with_pool_test_() ->
             {"transaction/3 wraps fun and routes inner queries to tx conn",
                 fun transaction_routes_inner_queries/0},
             {"transaction/3 rolls back on error", fun transaction_rollback/0},
-            {"a COMMIT the server rejects raises", fun rejected_commit_raises/0}
+            {"a COMMIT the server rejects raises", fun rejected_commit_raises/0},
+            {"a COMMIT that gets no answer raises as unknown", fun unanswered_commit_raises/0}
         ]
     end}.
 
 nested_test_() ->
     {setup, fun nested_setup/0, fun nested_teardown/1, fun(_) ->
-        [
-            {Title, fun() -> emptied(Test) end}
-         || {Title, Test} <- [
-                {"a raise in a nested transaction undoes only its own work",
-                    fun nested_raise_undoes_only_its_work/0},
-                {"rolling back the outer transaction undoes a nested one",
-                    fun outer_rollback_undoes_nested/0},
-                {"a nested transaction is invisible until the outer one commits",
-                    fun nested_waits_for_outer_commit/0},
-                {"the outer transaction carries on after a nested one",
-                    fun outer_continues_after_nested/0},
-                {"a nested transaction whose statement failed reports the rollback",
-                    fun failed_statement_in_nested_raises/0}
-            ]
-        ]
+        {foreach, fun emptied/0, fun(_) -> ok end, [
+            {"a raise in a nested transaction undoes only its own work",
+                fun nested_raise_undoes_only_its_work/0},
+            {"rolling back the outer transaction undoes a nested one",
+                fun outer_rollback_undoes_nested/0},
+            {"a nested transaction is invisible until the outer one commits",
+                fun nested_waits_for_outer_commit/0},
+            {"the outer transaction carries on after a nested one",
+                fun outer_continues_after_nested/0},
+            {"a nested transaction whose statement failed reports the rollback",
+                fun failed_statement_in_nested_raises/0},
+            {"a nested transaction in an aborted one raises before its function runs",
+                fun savepoint_refused_raises/0},
+            {"a raise two levels down undoes only the innermost work", fun doubly_nested_raise/0}
+        ]}
     end}.
 
 setup() ->
@@ -101,19 +102,45 @@ transaction_rollback() ->
     ).
 
 rejected_commit_raises() ->
-    ok = sql(~"DROP TABLE IF EXISTS kura_driver_deferred"),
-    ok = sql(
-        ~"CREATE TABLE kura_driver_deferred (id integer PRIMARY KEY, parent integer REFERENCES kura_driver_deferred (id) DEFERRABLE INITIALLY DEFERRED)"
-    ),
+    Table = table(~"kura_driver_deferred"),
+    ok = sql([~"DROP TABLE IF EXISTS ", Table]),
+    ok = sql([
+        ~"CREATE TABLE ",
+        Table,
+        ~" (id integer PRIMARY KEY, parent integer REFERENCES ",
+        Table,
+        ~" (id) DEFERRABLE INITIALLY DEFERRED)"
+    ]),
     try
-        ?assertError(
-            {kura_driver_minato, {commit_failed, {pgsql_error, #{code := ~"23503"}}}},
-            transaction(fun() -> sql(~"INSERT INTO kura_driver_deferred VALUES (1, 2)") end)
+        Raised =
+            try transaction(fun() -> sql([~"INSERT INTO ", Table, ~" VALUES (1, 2)"]) end) of
+                Returned -> {returned, Returned}
+            catch
+                error:Reason -> Reason
+            end,
+        ?assertMatch(
+            {kura_driver_minato, {commit_failed, {pgsql_error, #{code := ~"23503"}}}}, Raised
         ),
-        ?assertEqual([], ids(~"kura_driver_deferred"))
+        {kura_driver_minato, {commit_failed, {pgsql_error, Fields}}} = Raised,
+        ?assertEqual([code, constraint, severity], lists:sort(maps:keys(Fields))),
+        ?assertEqual([], ids(Table))
     after
-        sql(~"DROP TABLE kura_driver_deferred")
+        _ = query([~"DROP TABLE IF EXISTS ", Table], [])
     end.
+
+unanswered_commit_raises() ->
+    ?assertError(
+        {kura_driver_minato, {commit_unknown, {holder_died, _}}},
+        transaction(fun() ->
+            Holder = held(),
+            Monitor = erlang:monitor(process, Holder),
+            exit(Holder, kill),
+            receive
+                {'DOWN', Monitor, process, Holder, _} -> ok
+            end
+        end)
+    ),
+    ?assertEqual(ok, wait_for_ready(?POOL, 5000)).
 
 nested_raise_undoes_only_its_work() ->
     transaction(fun() ->
@@ -128,7 +155,7 @@ nested_raise_undoes_only_its_work() ->
         ok = insert(3),
         ?assertEqual([], seen_elsewhere())
     end),
-    ?assertEqual([1, 3], ids(~"kura_driver_nested")).
+    ?assertEqual([1, 3], ids(nested_table())).
 
 outer_rollback_undoes_nested() ->
     ?assertThrow(
@@ -139,26 +166,27 @@ outer_rollback_undoes_nested() ->
             throw(outer)
         end)
     ),
-    ?assertEqual([], ids(~"kura_driver_nested")).
+    ?assertEqual([], ids(nested_table())).
 
 nested_waits_for_outer_commit() ->
     transaction(fun() ->
         ok = transaction(fun() -> insert(1) end),
         ?assertEqual([], seen_elsewhere())
     end),
-    ?assertEqual([1], ids(~"kura_driver_nested")).
+    ?assertEqual([1], ids(nested_table())).
 
 outer_continues_after_nested() ->
     ?assertThrow(
         outer,
         transaction(fun() ->
+            Holder = kura_pool_minato:transaction_conn(?POOL),
             ok = transaction(fun() -> ok end),
-            ?assertNotEqual(undefined, kura_pool_minato:transaction_conn(?POOL)),
+            ?assertEqual(Holder, kura_pool_minato:transaction_conn(?POOL)),
             ok = insert(1),
             throw(outer)
         end)
     ),
-    ?assertEqual([], ids(~"kura_driver_nested")).
+    ?assertEqual([], ids(nested_table())).
 
 failed_statement_in_nested_raises() ->
     transaction(fun() ->
@@ -174,7 +202,39 @@ failed_statement_in_nested_raises() ->
         ok = insert(3),
         ?assertEqual([], seen_elsewhere())
     end),
-    ?assertEqual([1, 3], ids(~"kura_driver_nested")).
+    ?assertEqual([1, 3], ids(nested_table())).
+
+savepoint_refused_raises() ->
+    Self = self(),
+    ?assertError(
+        {kura_driver_minato, {savepoint_failed, {pgsql_error, #{code := ~"25P02"}}}},
+        transaction(fun() ->
+            {error, _} = query(~"SELECT 1/0", []),
+            transaction(fun() -> Self ! nested_ran end)
+        end)
+    ),
+    receive
+        nested_ran -> error(nested_function_ran)
+    after 0 -> ok
+    end.
+
+doubly_nested_raise() ->
+    transaction(fun() ->
+        ok = insert(1),
+        ok = transaction(fun() ->
+            ok = insert(2),
+            ?assertThrow(
+                inner,
+                transaction(fun() ->
+                    ok = insert(3),
+                    throw(inner)
+                end)
+            ),
+            insert(4)
+        end),
+        ?assertEqual([], seen_elsewhere())
+    end),
+    ?assertEqual([1, 2, 4], ids(nested_table())).
 
 %%----------------------------------------------------------------------
 %% helpers
@@ -182,28 +242,42 @@ failed_statement_in_nested_raises() ->
 
 nested_setup() ->
     ok = setup(),
-    ok = sql(~"DROP TABLE IF EXISTS kura_driver_nested"),
-    sql(~"CREATE TABLE kura_driver_nested (id integer)").
+    ok = sql([~"DROP TABLE IF EXISTS ", nested_table()]),
+    sql([~"CREATE TABLE ", nested_table(), ~" (id integer)"]).
 
 nested_teardown(Arg) ->
-    _ = sql(~"DROP TABLE IF EXISTS kura_driver_nested"),
+    _ = query([~"DROP TABLE IF EXISTS ", nested_table()], []),
     teardown(Arg).
+
+%% Each OS process gets its own tables, so test runs sharing the database
+%% cannot drop or truncate each other's.
+table(Base) ->
+    iolist_to_binary([Base, ~"_", os:getpid()]).
+
+nested_table() ->
+    table(~"kura_driver_nested").
 
 seen_elsewhere() ->
     Self = self(),
-    {Reader, Monitor} = spawn_monitor(fun() -> Self ! {seen, self(), ids(~"kura_driver_nested")} end),
+    {Reader, Monitor} = spawn_monitor(fun() -> Self ! {seen, self(), ids(nested_table())} end),
     receive
         {seen, Reader, Seen} ->
             erlang:demonitor(Monitor, [flush]),
             Seen;
         {'DOWN', Monitor, process, Reader, Reason} ->
             error({reader_failed, Reason})
-    after 2000 -> error(reader_never_answered)
+    after 2000 ->
+        exit(Reader, kill),
+        error(reader_never_answered)
     end.
 
-emptied(Test) ->
-    ok = sql(~"TRUNCATE kura_driver_nested"),
-    Test().
+emptied() ->
+    sql([~"TRUNCATE ", nested_table()]).
+
+held() ->
+    case kura_pool_minato:transaction_conn(?POOL) of
+        Holder when is_pid(Holder) -> Holder
+    end.
 
 transaction(Fun) ->
     kura_driver_minato:transaction(kura_pool_minato, ?POOL, Fun, #{}).
@@ -216,11 +290,11 @@ sql(SQL) ->
     ok.
 
 insert(Id) ->
-    #{num_rows := 1} = query(~"INSERT INTO kura_driver_nested VALUES ($1)", [Id]),
+    #{num_rows := 1} = query([~"INSERT INTO ", nested_table(), ~" VALUES ($1)"], [Id]),
     ok.
 
 ids(Table) ->
-    #{rows := Rows} = query(<<"SELECT id FROM ", Table/binary, " ORDER BY id">>, []),
+    #{rows := Rows} = query([~"SELECT id FROM ", Table, ~" ORDER BY id"], []),
     [Id || #{id := Id} <- Rows].
 
 wait_for_ready(_Pool, T) when T =< 0 ->
