@@ -94,9 +94,10 @@ Other failures raise `error({kura_driver_minato, {Failure, Reason}})`:
   that transaction or savepoint was kept.
 - `commit_unknown`: no answer came back, for example on a timeout or a lost
   connection, so the server may or may not have committed.
+- `no_connection`: no connection could be checked out, and `Fun` did not run.
 
-A server error is reduced to its `code`, `constraint` and `severity`, since its
-message and detail can carry row values.
+A server error is reduced to its `code`, `constraint`, `severity` and
+`severity_non_localised`, since its message and detail can carry row values.
 """.
 -spec transaction(module(), kura_pool:name(), fun(() -> term()), map()) -> term().
 transaction(_PoolMod, Pool, Fun, _Opts) ->
@@ -148,10 +149,14 @@ inside(Pool, Holder, Fun) ->
 -spec committed(pid(), term()) -> term().
 committed(Holder, Value) ->
     case statement(Holder, ~"COMMIT") of
-        #{command := commit} -> Value;
-        #{command := rollback} -> error(transaction_rolled_back);
-        {error, {pgsql_error, _}} = Refused -> failed(commit_failed, Refused);
-        Unknown -> failed(commit_unknown, Unknown)
+        #{command := commit} ->
+            Value;
+        #{command := rollback} ->
+            error(transaction_rolled_back);
+        {error, {pgsql_error, _}} = Refused ->
+            failed(commit_failed, Refused);
+        Unknown ->
+            failed(commit_unknown, Unknown)
     end.
 
 -spec nested(pid(), fun(() -> term())) -> term().
@@ -178,7 +183,7 @@ released(Holder, Savepoint, Value) ->
 
 -spec savepoint_name() -> binary().
 savepoint_name() ->
-    <<"kura_savepoint_", (integer_to_binary(erlang:unique_integer([positive])))/binary>>.
+    iolist_to_binary([~"kura_savepoint_", integer_to_binary(erlang:unique_integer([positive]))]).
 
 -spec expect(dynamic(), atom(), atom()) -> ok.
 expect(#{command := Command}, Command, _Failure) -> ok;
@@ -188,7 +193,9 @@ expect(Answer, _Command, Failure) -> failed(Failure, Answer).
 failed(Failure, {error, {pgsql_error, Fields}}) when is_map(Fields) ->
     error(
         {kura_driver_minato,
-            {Failure, {pgsql_error, maps:with([code, constraint, severity], Fields)}}}
+            {Failure,
+                {pgsql_error,
+                    maps:with([code, constraint, severity, severity_non_localised], Fields)}}}
     );
 failed(Failure, {error, Reason}) ->
     error({kura_driver_minato, {Failure, Reason}});
@@ -198,8 +205,14 @@ failed(Failure, Answer) ->
     error({kura_driver_minato, {Failure, Answer}}).
 
 -spec statement(pid(), iodata()) -> dynamic().
+%% A raise here would replace the exception being cleaned up after, so it becomes
+%% an answer that the caller names like any other failure.
 statement(Holder, SQL) ->
-    kura_pool_minato:run(Holder, SQL, [], #{}).
+    try
+        kura_pool_minato:run(Holder, SQL, [], #{})
+    catch
+        Class:_ -> {raised, Class}
+    end.
 
 %%----------------------------------------------------------------------
 %% Creating the database

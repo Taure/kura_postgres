@@ -21,7 +21,9 @@ with_pool_test_() ->
                 fun transaction_routes_inner_queries/0},
             {"transaction/3 rolls back on error", fun transaction_rollback/0},
             {"a COMMIT the server rejects raises", fun rejected_commit_raises/0},
-            {"a COMMIT that gets no answer raises as unknown", fun unanswered_commit_raises/0}
+            {"a COMMIT that gets no answer raises as unknown", fun unanswered_commit_raises/0},
+            {"a COMMIT the server ends the session on raises as unknown",
+                fun ended_commit_raises_unknown/0}
         ]
     end}.
 
@@ -40,7 +42,13 @@ nested_test_() ->
                 fun failed_statement_in_nested_raises/0},
             {"a nested transaction in an aborted one raises before its function runs",
                 fun savepoint_refused_raises/0},
-            {"a raise two levels down undoes only the innermost work", fun doubly_nested_raise/0}
+            {"a raise two levels down undoes only the innermost work", fun doubly_nested_raise/0},
+            {"a nested transaction that raised leaves no savepoint behind",
+                fun raised_nested_releases_savepoint/0},
+            {"a RELEASE the server refuses raises", fun refused_release_raises/0},
+            {"a cleanup that raises keeps the original exception",
+                fun raised_cleanup_keeps_original/0},
+            {"a SAVEPOINT that raises is named like a refused one", fun raised_savepoint_is_named/0}
         ]}
     end}.
 
@@ -122,7 +130,9 @@ rejected_commit_raises() ->
             {kura_driver_minato, {commit_failed, {pgsql_error, #{code := ~"23503"}}}}, Raised
         ),
         {kura_driver_minato, {commit_failed, {pgsql_error, Fields}}} = Raised,
-        ?assertEqual([code, constraint, severity], lists:sort(maps:keys(Fields))),
+        ?assertEqual(
+            [code, constraint, severity, severity_non_localised], lists:sort(maps:keys(Fields))
+        ),
         ?assertEqual([], ids(Table))
     after
         _ = query([~"DROP TABLE IF EXISTS ", Table], [])
@@ -273,6 +283,99 @@ seen_elsewhere() ->
 
 emptied() ->
     sql([~"TRUNCATE ", nested_table()]).
+
+raised_nested_releases_savepoint() ->
+    transaction(fun() ->
+        ok = insert(1),
+        ?assertThrow(
+            inner,
+            transaction(fun() ->
+                ok = insert(2),
+                throw(inner)
+            end)
+        ),
+        ok = insert(3),
+        #{rows := [#{n := Held}]} = query(
+            ~"SELECT count(*)::integer AS n FROM pg_locks WHERE pid = pg_backend_pid() AND locktype = 'transactionid'",
+            []
+        ),
+        ?assertEqual(1, Held)
+    end).
+
+refused_release_raises() ->
+    ?assertError(
+        {kura_driver_minato, {release_failed, {pgsql_error, #{code := ~"25P01"}}}},
+        transaction(fun() -> transaction(fun() -> sql(~"ROLLBACK") end) end)
+    ).
+
+ended_commit_raises_unknown() ->
+    Table = table(~"kura_driver_ended"),
+    ok = sql([~"DROP TABLE IF EXISTS ", Table]),
+    ok = sql([~"CREATE TABLE ", Table, ~" (id integer)"]),
+    ok = sql([
+        ~"CREATE OR REPLACE FUNCTION ",
+        Table,
+        ~"() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_terminate_backend(pg_backend_pid()); PERFORM pg_sleep(1); RETURN NULL; END $$"
+    ]),
+    ok = sql([
+        ~"CREATE CONSTRAINT TRIGGER ",
+        Table,
+        ~" AFTER INSERT ON ",
+        Table,
+        ~" DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ",
+        Table,
+        ~"()"
+    ]),
+    try
+        ?assertError(
+            {kura_driver_minato, {commit_unknown, _}},
+            transaction(fun() -> sql([~"INSERT INTO ", Table, ~" VALUES (1)"]) end)
+        ),
+        ?assertEqual(ok, wait_for_ready(?POOL, 5000))
+    after
+        _ = query([~"DROP TABLE IF EXISTS ", Table], []),
+        _ = query([~"DROP FUNCTION IF EXISTS ", Table, ~"()"], [])
+    end.
+
+raised_cleanup_keeps_original() ->
+    with_fake_holder(fun fails_after_savepoint/1, fun() ->
+        ?assertThrow(original, transaction(fun() -> throw(original) end))
+    end).
+
+raised_savepoint_is_named() ->
+    with_fake_holder(fun fails_always/1, fun() ->
+        ?assertError(
+            {kura_driver_minato, {savepoint_failed, {raised, error}}},
+            transaction(fun() -> ok end)
+        )
+    end).
+
+fails_after_savepoint(<<"SAVEPOINT ", _/binary>>) -> #{command => savepoint};
+fails_after_savepoint(_Cleanup) -> {raised, error, lost, []}.
+
+fails_always(_SQL) -> {raised, error, lost, []}.
+
+%% Stands in for the transaction's holder, answering every statement with Answer.
+with_fake_holder(Answer, Test) ->
+    transaction(fun() ->
+        Holder = held(),
+        Fake = spawn_link(fun() -> answering(Answer) end),
+        ok = kura_pool_minato:in_transaction(?POOL, Fake),
+        try
+            Test()
+        after
+            ok = kura_pool_minato:in_transaction(?POOL, Holder),
+            unlink(Fake),
+            exit(Fake, kill)
+        end
+    end).
+
+answering(Answer) ->
+    receive
+        {call, Alias, {run, SQL, _Params, _Opts}} ->
+            Alias ! {Alias, Answer(iolist_to_binary(SQL))},
+            answering(Answer)
+    end.
 
 held() ->
     case kura_pool_minato:transaction_conn(?POOL) of
