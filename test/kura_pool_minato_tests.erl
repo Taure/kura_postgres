@@ -31,7 +31,9 @@ with_pool_test_() ->
             {"a statement that loses the connection ends the holder",
                 fun lost_connection_ends_the_holder/0},
             {"a statement that raises re-raises in the caller and ends the holder",
-                fun raising_statement_ends_the_holder/0}
+                fun raising_statement_ends_the_holder/0},
+            {"a held connection builds and drops an index concurrently",
+                fun concurrent_index_on_a_held_connection/0}
         ]
     end}.
 
@@ -92,7 +94,8 @@ capabilities_set() ->
                 vector,
                 transactions,
                 savepoints,
-                prepared_statements
+                prepared_statements,
+                concurrent_indexes
             ]
         )
     ).
@@ -113,6 +116,18 @@ with_conn_roundtrip() ->
     ?assertMatch(#{rows := [_]}, Result),
     #{rows := [Row]} = Result,
     ?assertEqual([42], tuple_to_list(Row)).
+
+concurrent_index_on_a_held_connection() ->
+    Statements = [
+        ~"DROP TABLE IF EXISTS kura_pool_minato_concurrent",
+        ~"CREATE TABLE kura_pool_minato_concurrent (id integer)",
+        ~"CREATE INDEX CONCURRENTLY kura_pool_minato_concurrent_id ON kura_pool_minato_concurrent (id)",
+        ~"DROP INDEX CONCURRENTLY kura_pool_minato_concurrent_id",
+        ~"DROP TABLE kura_pool_minato_concurrent"
+    ],
+    kura_pool:with_conn(kura_pool_minato, ?POOL, fun(Conn) ->
+        [?assertNotMatch({error, _}, kura_pool_minato:run(Conn, SQL, [], #{})) || SQL <- Statements]
+    end).
 
 sequential_checkouts() ->
     %% Two back-to-back checkouts must both succeed (proves checkin returned the

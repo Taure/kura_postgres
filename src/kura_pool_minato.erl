@@ -61,7 +61,8 @@ capabilities() ->
         vector,
         transactions,
         savepoints,
-        prepared_statements
+        prepared_statements,
+        concurrent_indexes
     ].
 
 -doc """
