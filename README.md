@@ -38,8 +38,9 @@ On application start, Kura resolves the aggregator and auto-populates `dialect`,
 
 ```
 [returning, jsonb, arrays, advisory_locks, listen_notify,
- select_for_update_skip_locked, partial_indexes, transactions,
- savepoints, prepared_statements]
+ select_for_update_skip_locked, partial_indexes, window_functions,
+ full_text_search, vector, transactions, savepoints,
+ prepared_statements, concurrent_indexes]
 ```
 
 ## License
