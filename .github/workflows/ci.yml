@@ -8,7 +8,7 @@ on:
       - 'LICENSE'
       - '.gitignore'
   pull_request:
-    branches: [main]
+    branches: [main, next]
     paths-ignore:
       - '**.md'
       - 'LICENSE'
@@ -34,6 +34,6 @@ jobs:
       enable-summary: true
       enable-mutate: false
       enable-elp-lint: true
-      enable-elp-eqwalize: false
+      enable-elp-eqwalize: true
 
       extra-services-compose: 'docker-compose.ci.yml'
