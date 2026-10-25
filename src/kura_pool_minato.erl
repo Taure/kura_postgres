@@ -25,8 +25,8 @@ that times out ends it too, so a request still queued behind it cannot run
 later. `give_away/3` moves the watch rather than the socket, because the
 socket never left the holder.
 
-A `checkin/2` is not a reset: minato rolls back an open transaction, but the
-next borrower gets whatever else the session holds.
+A `checkin/2` hands the connection to minato, which rolls back an open
+transaction and resets the session before it lends the connection again.
 """.
 
 -behaviour(kura_pool).
