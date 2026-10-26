@@ -44,6 +44,10 @@ with_pool_test_() ->
                 fun run_in_transaction_stays_refused/0},
             {"run_in_transaction/4 tells a chained rollback from a savepoint rollback",
                 fun run_in_transaction_tells_rollbacks_apart/0},
+            {"open_transaction/1 answers the error of a BEGIN the server refuses",
+                fun refused_open_transaction/0},
+            {"open_transaction/1 that loses the connection ends the holder",
+                fun lost_open_transaction_ends_the_holder/0},
             {"a marker read the server refuses counts as an ended transaction",
                 fun refused_marker_read_ends/0},
             {"a marker read that loses the connection answers the connection error",
@@ -243,6 +247,35 @@ run_in_transaction_tells_rollbacks_apart() ->
     after
         ok = kura_pool_minato:checkin(?POOL, Token)
     end.
+
+refused_open_transaction() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        {error, {pgsql_error, _}} = kura_pool_minato:run(Conn, ~"SELECT 1 / 0", [], #{}),
+        ?assertMatch(
+            {error, {pgsql_error, #{code := ~"25P02"}}}, kura_pool_minato:open_transaction(Conn)
+        ),
+        ?assertMatch(#{command := rollback}, kura_pool_minato:run(Conn, ~"ROLLBACK", [], #{}))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+lost_open_transaction_ends_the_holder() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    Monitor = erlang:monitor(process, Conn),
+    #{rows := [Row]} = kura_pool_minato:run(Conn, ~"SELECT pg_backend_pid()", [], #{}),
+    [Backend] = tuple_to_list(Row),
+    #{rows := [_]} = kura_pool:with_conn(kura_pool_minato, ?POOL, fun(Other) ->
+        kura_pool_minato:run(Other, ~"SELECT pg_terminate_backend($1, 1000)", [Backend], #{})
+    end),
+    ?assertMatch({error, {socket, _}}, kura_pool_minato:open_transaction(Conn)),
+    receive
+        {'DOWN', Monitor, process, Conn, _} -> ok
+    after 2000 -> error(holder_still_running)
+    end,
+    ?assertEqual(ok, kura_pool_minato:checkin(?POOL, Token)),
+    ?assertEqual(ok, wait_for_ready(?POOL, 2000)).
 
 refused_marker_read_ends() ->
     {ok, Conn} = minato_pool:checkout(?POOL, 5000),
