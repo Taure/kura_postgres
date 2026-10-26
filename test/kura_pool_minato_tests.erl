@@ -48,6 +48,8 @@ with_pool_test_() ->
                 fun refused_open_transaction/0},
             {"open_transaction/1 that loses the connection ends the holder",
                 fun lost_open_transaction_ends_the_holder/0},
+            {"run_in_transaction/4 that loses the connection answers unknown and ends the holder",
+                fun lost_run_in_transaction_ends_the_holder/0},
             {"a marker read the server refuses counts as an ended transaction",
                 fun refused_marker_read_ends/0},
             {"a marker read that loses the connection answers the connection error",
@@ -270,6 +272,28 @@ lost_open_transaction_ends_the_holder() ->
         kura_pool_minato:run(Other, ~"SELECT pg_terminate_backend($1, 1000)", [Backend], #{})
     end),
     ?assertMatch({error, {socket, _}}, kura_pool_minato:open_transaction(Conn)),
+    receive
+        {'DOWN', Monitor, process, Conn, _} -> ok
+    after 2000 -> error(holder_still_running)
+    end,
+    ?assertEqual(ok, kura_pool_minato:checkin(?POOL, Token)),
+    ?assertEqual(ok, wait_for_ready(?POOL, 2000)).
+
+lost_run_in_transaction_ends_the_holder() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    Monitor = erlang:monitor(process, Conn),
+    #{command := 'begin'} = kura_pool_minato:open_transaction(Conn),
+    {#{command := savepoint}, transaction} =
+        kura_pool_minato:run_in_transaction(Conn, ~"SAVEPOINT caller", [], #{}),
+    #{rows := [Row]} = kura_pool_minato:run(Conn, ~"SELECT pg_backend_pid()", [], #{}),
+    [Backend] = tuple_to_list(Row),
+    #{rows := [_]} = kura_pool:with_conn(kura_pool_minato, ?POOL, fun(Other) ->
+        kura_pool_minato:run(Other, ~"SELECT pg_terminate_backend($1, 1000)", [Backend], #{})
+    end),
+    ?assertMatch(
+        {{error, _}, unknown},
+        kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK TO SAVEPOINT caller", [], #{})
+    ),
     receive
         {'DOWN', Monitor, process, Conn, _} -> ok
     after 2000 -> error(holder_still_running)
