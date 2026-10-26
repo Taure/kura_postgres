@@ -55,8 +55,12 @@ transaction is rolled back when the connection is checked in.
 `ROLLBACK TO SAVEPOINT` does. `transaction/4` begins with a transaction-local
 setting sent in the same round trip as its `BEGIN`, and only a statement tagged
 `ROLLBACK` that leaves the connection in a transaction is followed by one more
-query to read it back: a savepoint rollback keeps the setting, a chained
-rollback has replaced the transaction and lost it, and raises the same error.
+query to read it back, under the statement's `timeout`: a savepoint rollback
+keeps the setting, a chained rollback has replaced the transaction and lost it,
+and raises the same error. A `RESET ALL` inside the transaction clears the
+setting too, so a later `ROLLBACK TO SAVEPOINT`, including the one a nested
+`transaction/4` cleans up with, raises `transaction_ended_by_statement` while the
+transaction is still open. Avoid `RESET ALL` inside `transaction/4`.
 
 This covers transactions `transaction/4` opens. A sandboxed test runs its
 statements through `query_on/4`, which does not check.

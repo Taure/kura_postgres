@@ -95,6 +95,18 @@ nested_test_() ->
                 fun caught_rollback_chain_commits_nothing/0},
             {"the caller's own ROLLBACK TO SAVEPOINT leaves the transaction open",
                 fun own_rollback_to_keeps_transaction/0},
+            {"SET TRANSACTION ISOLATION LEVEL works as the first statement", fun() ->
+                first_set_transaction(
+                    ~"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                    ~"transaction_isolation",
+                    ~"serializable"
+                )
+            end},
+            {"SET TRANSACTION READ ONLY works as the first statement", fun() ->
+                first_set_transaction(
+                    ~"SET TRANSACTION READ ONLY", ~"transaction_read_only", ~"on"
+                )
+            end},
             {"a refused ROLLBACK TO rolls back the whole transaction",
                 fun refused_rollback_to_rolls_back_everything/0},
             {"a ROLLBACK TO that raises keeps the original exception",
@@ -504,6 +516,18 @@ caught_rollback_chain_commits_nothing() ->
         end)
     ),
     ?assertEqual([], ids(nested_table())).
+
+first_set_transaction(Statement, Setting, Expected) ->
+    ?assertEqual(
+        Expected,
+        transaction(fun() ->
+            ok = sql(Statement),
+            #{rows := [#{setting := Value}]} = query(
+                ~"SELECT current_setting($1) AS setting", [Setting]
+            ),
+            Value
+        end)
+    ).
 
 own_rollback_to_keeps_transaction() ->
     ok = transaction(fun() ->

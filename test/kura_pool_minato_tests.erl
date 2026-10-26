@@ -43,7 +43,11 @@ with_pool_test_() ->
             {"run_in_transaction/4 stays refused after a new BEGIN",
                 fun run_in_transaction_stays_refused/0},
             {"run_in_transaction/4 tells a chained rollback from a savepoint rollback",
-                fun run_in_transaction_tells_rollbacks_apart/0}
+                fun run_in_transaction_tells_rollbacks_apart/0},
+            {"a marker read the server refuses counts as an ended transaction",
+                fun refused_marker_read_ends/0},
+            {"a marker read that loses the connection answers the connection error",
+                fun lost_marker_read_is_a_connection_error/0}
         ]
     end}.
 
@@ -239,6 +243,19 @@ run_in_transaction_tells_rollbacks_apart() ->
     after
         ok = kura_pool_minato:checkin(?POOL, Token)
     end.
+
+refused_marker_read_ends() ->
+    {ok, Conn} = minato_pool:checkout(?POOL, 5000),
+    {ok, _Began, Begun} = minato_query:query(Conn, ~"BEGIN", []),
+    {error, {pgsql_error, _}, Failed} = minato_query:query(Begun, ~"SELECT 1 / 0", []),
+    {ended, Next} = kura_pool_minato:marked(Failed, #{}),
+    ok = minato_pool:discard(?POOL, Next).
+
+lost_marker_read_is_a_connection_error() ->
+    {ok, Conn} = minato_pool:checkout(?POOL, 5000),
+    ok = minato_conn:close(Conn),
+    ?assertMatch({lost, {error, _}}, kura_pool_minato:marked(Conn, #{})),
+    ok = minato_pool:discard(?POOL, Conn).
 
 sequential_checkouts() ->
     %% Two back-to-back checkouts must both succeed (proves checkin returned the

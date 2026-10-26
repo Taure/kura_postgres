@@ -47,6 +47,10 @@ transaction and resets the session before it lends the connection again.
 
 -export([open_transaction/1, run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
 
+-ifdef(TEST).
+-export([marked/2]).
+-endif.
+
 -export_type([transaction_status/0]).
 
 -doc """
@@ -67,7 +71,7 @@ it from.
 
 -define(CALL_TIMEOUT, 30000).
 
--define(OPEN_TRANSACTION, ~"BEGIN; SELECT set_config('kura.txn', '1', true)").
+-define(OPEN_TRANSACTION, ~"BEGIN; SET LOCAL kura.txn = '1'").
 -define(MARKER, ~"SELECT current_setting('kura.txn', true)").
 
 -doc "What this backend supports. Read by `kura_capabilities`.".
@@ -204,11 +208,13 @@ run(Holder, Sql, Params, Opts) ->
 -doc """
 Begin a transaction on a held connection. Used by `m:kura_driver_minato`.
 
-Answers what the `BEGIN` answered. It goes as one simple query together with a
-transaction-local setting, `kura.txn`, so it costs one round trip. The setting
+Answers what the `BEGIN` answered. It goes as one simple query together with
+`SET LOCAL kura.txn = '1'`, so it costs one round trip. `SET` takes no snapshot,
+so the transaction's first statement may still be `SET TRANSACTION`. The setting
 is what tells a statement tagged `ROLLBACK` that left the connection in a
 transaction apart: `ROLLBACK TO SAVEPOINT` keeps it, while `ROLLBACK AND CHAIN`
-and `ABORT AND CHAIN` start a new transaction without it.
+and `ABORT AND CHAIN` start a new transaction without it. So does `RESET ALL`,
+after which a savepoint rollback reads as a replaced transaction.
 """.
 -spec open_transaction(pid()) -> dynamic().
 open_transaction(Holder) ->
@@ -317,10 +323,10 @@ answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts})
             Alias ! {Alias, reported(Within, Answer, unknown)},
             ok;
         {continue, Answer, Next} ->
-            case became(Within, Answer, Next) of
-                {lost, Status} ->
+            case became(Within, Answer, Next, Opts) of
+                {lost, Lost} ->
                     minato_pool:discard(Pool, Next),
-                    Alias ! {Alias, reported(Within, Answer, Status)},
+                    Alias ! {Alias, reported(Within, Lost, unknown)},
                     ok;
                 {Status, Checked} ->
                     Alias ! {Alias, reported(Within, Answer, Status)},
@@ -333,28 +339,29 @@ answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts})
             ok
     end.
 
--spec became(within(), dynamic(), minato_conn:conn()) ->
-    {transaction_status(), minato_conn:conn()} | {lost, ended}.
-became(_Within, #{command := commit}, Conn) ->
+-spec became(within(), dynamic(), minato_conn:conn(), map()) ->
+    {transaction_status(), minato_conn:conn()} | {lost, {error, term()}}.
+became(_Within, #{command := commit}, Conn, _Opts) ->
     {ended, Conn};
-became(transaction, #{command := rollback}, Conn) ->
+became(transaction, #{command := rollback}, Conn, Opts) ->
     case minato_conn:transaction_status(Conn) of
         idle -> {ended, Conn};
-        _Chained -> marked(Conn)
+        _Chained -> marked(Conn, Opts)
     end;
-became(_Within, _Answer, Conn) ->
+became(_Within, _Answer, Conn, _Opts) ->
     case minato_conn:transaction_status(Conn) of
         idle -> {ended, Conn};
         Status -> {Status, Conn}
     end.
 
--spec marked(minato_conn:conn()) -> {transaction_status(), minato_conn:conn()} | {lost, ended}.
-marked(Conn) ->
-    case minato_query:simple(Conn, ?MARKER) of
+-spec marked(minato_conn:conn(), map()) ->
+    {transaction_status(), minato_conn:conn()} | {lost, {error, term()}}.
+marked(Conn, Opts) ->
+    case minato_query:simple(Conn, ?MARKER, maps:with([timeout], Opts)) of
         {ok, [#{rows := [{~"1"}]}], Next} -> {transaction, Next};
         {ok, _Replaced, Next} -> {ended, Next};
         {error, _Reason, Next} -> {ended, Next};
-        {error, _Reason} -> {lost, ended}
+        {error, Reason} -> {lost, {error, Reason}}
     end.
 
 -spec still(within(), transaction_status(), open | ended) -> open | ended.
