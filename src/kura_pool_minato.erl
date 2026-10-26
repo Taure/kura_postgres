@@ -78,18 +78,24 @@ connection settings are gathered under `connection`. `host`, `user`, `password`
 and `database` are accepted as strings or binaries, because kura configuration
 in the wild is written both ways.
 
+A pool needs `user` (or `username`). Without it `start_pool/2` returns
+`{error, {missing_option, user}}` and starts nothing, where minato would
+start a pool whose connections cannot log in.
+
 `transport` is passed through. minato chooses one by default and documents the
 other as the way back from that choice, which is only true from here if the
 option survives the translation.
 """.
 -spec start_pool(kura_pool:name(), kura_pool:opts()) -> {ok, pid()} | {error, term()}.
-start_pool(Name, Opts) ->
+start_pool(Name, Opts) when is_map_key(user, Opts); is_map_key(username, Opts) ->
     {ok, _Started} = application:ensure_all_started(minato),
     case minato:start_pool(Name, translate(Opts)) of
         {ok, Pid} when is_pid(Pid) -> {ok, Pid};
         {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
         {error, Reason} -> {error, Reason}
-    end.
+    end;
+start_pool(_Name, _Opts) ->
+    {error, {missing_option, user}}.
 
 -doc "Stop a pool. A pool that is not running is not an error.".
 -spec stop_pool(kura_pool:name()) -> ok.

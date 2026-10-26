@@ -52,6 +52,22 @@ transport_survives_translation_test() ->
     _ = kura_pool_minato:stop_pool(Name),
     ok.
 
+a_pool_without_a_user_is_refused_test() ->
+    Config = maps:remove(user, ?CONFIG),
+    ?assertEqual(
+        {error, {missing_option, user}},
+        kura_pool_minato:start_pool(kura_pool_minato_no_user_test, Config)
+    ),
+    ?assertEqual(undefined, whereis(kura_pool_minato_no_user_test)).
+
+a_pool_given_username_is_started_test() ->
+    Name = kura_pool_minato_username_test,
+    Config = maps:remove(user, ?CONFIG),
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, Config#{username => ~"postgres"}),
+    ?assertEqual(ok, wait_for_ready(Name, 5000)),
+    _ = kura_pool_minato:stop_pool(Name),
+    ok.
+
 setup() ->
     application:ensure_all_started(minato),
     application:ensure_all_started(kura),
