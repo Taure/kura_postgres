@@ -48,7 +48,31 @@ nested_test_() ->
             {"a RELEASE the server refuses raises", fun refused_release_raises/0},
             {"a cleanup that raises keeps the original exception",
                 fun raised_cleanup_keeps_original/0},
-            {"a SAVEPOINT that raises is named like a refused one", fun raised_savepoint_is_named/0}
+            {"a SAVEPOINT that raises is named like a refused one",
+                fun raised_savepoint_is_named/0},
+            {"a COMMIT in a transaction raises and keeps the work before it", fun() ->
+                ended_by(~"COMMIT", [1])
+            end},
+            {"an END in a transaction raises and keeps the work before it", fun() ->
+                ended_by(~"END", [1])
+            end},
+            {"a ROLLBACK in a transaction raises and keeps nothing", fun() ->
+                ended_by(~"ROLLBACK", [])
+            end},
+            {"a COMMIT in a nested transaction raises and keeps the work before it", fun() ->
+                nested_ended_by(~"COMMIT", [1, 2])
+            end},
+            {"an END in a nested transaction raises and keeps the work before it", fun() ->
+                nested_ended_by(~"END", [1, 2])
+            end},
+            {"a ROLLBACK in a nested transaction raises and keeps nothing", fun() ->
+                nested_ended_by(~"ROLLBACK", [])
+            end},
+            {"a ROLLBACK after a failed statement raises", fun rollback_after_failure_raises/0},
+            {"a function that catches the end runs nothing more in autocommit",
+                fun caught_end_runs_nothing_more/0},
+            {"a nested transaction after a caught end does not start",
+                fun caught_end_starts_no_savepoint/0}
         ]}
     end}.
 
@@ -303,10 +327,81 @@ raised_nested_releases_savepoint() ->
     end).
 
 refused_release_raises() ->
+    with_fake_holder(fun refuses_release/1, fun() ->
+        ?assertError(
+            {kura_driver_minato, {release_failed, {pgsql_error, #{code := ~"XX000"}}}},
+            transaction(fun() -> ok end)
+        )
+    end).
+
+ended_by(Statement, Kept) ->
     ?assertError(
-        {kura_driver_minato, {release_failed, {pgsql_error, #{code := ~"25P01"}}}},
-        transaction(fun() -> transaction(fun() -> sql(~"ROLLBACK") end) end)
-    ).
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ok = sql(Statement),
+            insert(2)
+        end)
+    ),
+    ?assertEqual(Kept, ids(nested_table())),
+    ?assertEqual(undefined, kura_pool_minato:transaction_conn(?POOL)).
+
+nested_ended_by(Statement, Kept) ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ok = transaction(fun() ->
+                ok = insert(2),
+                ok = sql(Statement),
+                insert(3)
+            end),
+            insert(4)
+        end)
+    ),
+    ?assertEqual(Kept, ids(nested_table())).
+
+rollback_after_failure_raises() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            {error, {pgsql_error, _}} = query(~"SELECT 1 / 0", []),
+            ok = sql(~"ROLLBACK"),
+            insert(2)
+        end)
+    ),
+    ?assertEqual([], ids(nested_table())).
+
+caught_end_runs_nothing_more() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement}, sql(~"COMMIT")
+            ),
+            ?assertError({kura_driver_minato, transaction_ended_by_statement}, insert(2)),
+            ok
+        end)
+    ),
+    ?assertEqual([1], ids(nested_table())).
+
+caught_end_starts_no_savepoint() ->
+    Self = self(),
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement}, sql(~"ROLLBACK")
+            ),
+            transaction(fun() -> Self ! nested_ran end)
+        end)
+    ),
+    receive
+        nested_ran -> error(nested_function_ran)
+    after 0 -> ok
+    end.
 
 ended_commit_raises_unknown() ->
     Table = table(~"kura_driver_ended"),
@@ -355,6 +450,9 @@ fails_after_savepoint(_Cleanup) -> {raised, error, lost, []}.
 
 fails_always(_SQL) -> {raised, error, lost, []}.
 
+refuses_release(<<"SAVEPOINT ", _/binary>>) -> #{command => savepoint};
+refuses_release(_Release) -> {error, {pgsql_error, #{code => ~"XX000"}}}.
+
 %% Stands in for the transaction's holder, answering every statement with Answer.
 with_fake_holder(Answer, Test) ->
     transaction(fun() ->
@@ -374,8 +472,14 @@ answering(Answer) ->
     receive
         {call, Alias, {run, SQL, _Params, _Opts}} ->
             Alias ! {Alias, Answer(iolist_to_binary(SQL))},
+            answering(Answer);
+        {call, Alias, {run_in_transaction, SQL, _Params, _Opts}} ->
+            Alias ! {Alias, reported(Answer(iolist_to_binary(SQL)))},
             answering(Answer)
     end.
+
+reported({raised, _Class, _Reason, _Stack} = Raised) -> Raised;
+reported(Answer) -> {reported, Answer, transaction}.
 
 held() ->
     case kura_pool_minato:transaction_conn(?POOL) of

@@ -32,6 +32,22 @@ the wrong moment to change what `avg/1` returns for everybody.
 A repo that wants the exact form says `numeric_format => binary` in its driver
 options, and should, for anything that is money.
 
+## Transaction control in user SQL
+
+A `COMMIT`, `END` or `ROLLBACK` run through `query/5` inside `transaction/4`
+ends the transaction behind kura's back. Every statement there goes to the
+transaction's holder, which reads the transaction status the server sends in
+`ReadyForQuery` after it: a statement that leaves the connection `idle` raises
+`error({kura_driver_minato, transaction_ended_by_statement})`. Whatever it
+committed stays committed. A statement run after that, by a function that caught
+the error, is refused without reaching the server and raises the same, and so
+do the `COMMIT`, `SAVEPOINT` and `RELEASE` that `transaction/4` would send, so
+no work meant for the transaction runs in autocommit.
+
+The status rather than the SQL text is what is read, so a statement is caught
+however it is spelled. `COMMIT AND CHAIN` and `ROLLBACK AND CHAIN` are not:
+they start a new transaction at once, so the connection never reads as `idle`.
+
 ## Timeouts
 
 `timeout` in the driver options is a deadline on the statement rather than on
@@ -52,12 +68,19 @@ connection goes back to the pool rather than being closed.
 
 -define(DEFAULT_DECODE_OPTS, [return_rows_as_maps, column_name_as_atom]).
 
--doc "Run a statement on a pool, or on the transaction this process is inside.".
+-doc """
+Run a statement on a pool, or on the transaction this process is inside.
+
+Inside a transaction, a statement that ends it, or one run after it has ended,
+raises `error({kura_driver_minato, transaction_ended_by_statement})`.
+""".
 -spec query(module(), kura_pool:name(), iodata(), [term()], map()) -> dynamic().
 query(_PoolMod, Pool, SQL, Params, Opts) ->
     case kura_pool_minato:transaction_conn(Pool) of
-        undefined -> answered(minato:query(Pool, SQL, Params, decoding(Opts)));
-        Holder -> kura_pool_minato:run(Holder, SQL, Params, decoding(Opts))
+        undefined ->
+            answered(minato:query(Pool, SQL, Params, decoding(Opts)));
+        Holder ->
+            still_open(kura_pool_minato:run_in_transaction(Holder, SQL, Params, decoding(Opts)))
     end.
 
 -doc "Run a statement on a connection the caller checked out.".
@@ -95,6 +118,12 @@ Other failures raise `error({kura_driver_minato, {Failure, Reason}})`:
 - `commit_unknown`: no answer came back, for example on a timeout or a lost
   connection, so the server may or may not have committed.
 - `no_connection`: no connection could be checked out, and `Fun` did not run.
+
+`error({kura_driver_minato, transaction_ended_by_statement})` when a statement
+run inside `Fun`, such as a raw `COMMIT`, `END` or `ROLLBACK`, ended the
+transaction. Whatever it committed stays committed and nothing after it runs.
+Nested, it is raised the same way: the statement ended the outermost
+transaction, not just the savepoint.
 
 A server error is reduced to its `code`, `constraint`, `severity` and
 `severity_non_localised`, since its message and detail can carry row values.
@@ -148,7 +177,7 @@ inside(Pool, Holder, Fun) ->
 
 -spec committed(pid(), term()) -> term().
 committed(Holder, Value) ->
-    case statement(Holder, ~"COMMIT") of
+    case checked(Holder, ~"COMMIT") of
         #{command := commit} ->
             Value;
         #{command := rollback} ->
@@ -162,7 +191,7 @@ committed(Holder, Value) ->
 -spec nested(pid(), fun(() -> term())) -> term().
 nested(Holder, Fun) ->
     Savepoint = savepoint_name(),
-    ok = expect(statement(Holder, [~"SAVEPOINT ", Savepoint]), savepoint, savepoint_failed),
+    ok = expect(checked(Holder, [~"SAVEPOINT ", Savepoint]), savepoint, savepoint_failed),
     try
         Value = Fun(),
         released(Holder, Savepoint, Value)
@@ -175,7 +204,7 @@ nested(Holder, Fun) ->
 
 -spec released(pid(), binary(), term()) -> term().
 released(Holder, Savepoint, Value) ->
-    case statement(Holder, [~"RELEASE SAVEPOINT ", Savepoint]) of
+    case checked(Holder, [~"RELEASE SAVEPOINT ", Savepoint]) of
         #{command := release} -> Value;
         {error, {pgsql_error, #{code := ~"25P02"}}} -> error(transaction_rolled_back);
         Failed -> failed(release_failed, Failed)
@@ -203,6 +232,24 @@ failed(Failure, #{command := Command}) ->
     error({kura_driver_minato, {Failure, {unexpected, Command}}});
 failed(Failure, Answer) ->
     error({kura_driver_minato, {Failure, Answer}}).
+
+-spec still_open(ended | {dynamic(), kura_pool_minato:transaction_status()}) -> dynamic().
+still_open({_Answer, idle}) -> ended();
+still_open({Answer, _Open}) -> Answer;
+still_open(ended) -> ended().
+
+-spec ended() -> no_return().
+ended() ->
+    error({kura_driver_minato, transaction_ended_by_statement}).
+
+-spec checked(pid(), iodata()) -> dynamic().
+checked(Holder, SQL) ->
+    try kura_pool_minato:run_in_transaction(Holder, SQL, [], #{}) of
+        ended -> ended();
+        {Answer, _Status} -> Answer
+    catch
+        Class:_ -> {raised, Class}
+    end.
 
 -spec statement(pid(), iodata()) -> dynamic().
 %% A raise here would replace the exception being cleaned up after, so it becomes
