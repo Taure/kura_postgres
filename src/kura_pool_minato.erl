@@ -45,7 +45,7 @@ transaction and resets the session before it lends the connection again.
     capabilities/0
 ]).
 
--export([run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
+-export([open_transaction/1, run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
 
 -export_type([transaction_status/0]).
 
@@ -55,14 +55,20 @@ What became of the transaction a statement was run in. Used by
 
 `transaction` and `failed` are the status byte of the `ReadyForQuery` after it:
 still open, or open with a statement already failed in it. `ended` is a
-transaction the statement ended: the connection went back to `idle`, or the
-statement's tag was `COMMIT`, which `COMMIT AND CHAIN` answers while leaving a
-new transaction open that is not the one the caller began. `unknown` when no
-answer came back to read it from.
+transaction the statement ended: the connection went back to `idle`, the
+statement's tag was `COMMIT`, which `COMMIT AND CHAIN` answers, or its tag was
+`ROLLBACK` and the transaction left open is not the one `open_transaction/1`
+began, as after `ROLLBACK AND CHAIN`. `unknown` when no answer came back to read
+it from.
 """.
 -type transaction_status() :: transaction | failed | ended | unknown.
 
+-type within() :: opening | anywhere | transaction.
+
 -define(CALL_TIMEOUT, 30000).
+
+-define(OPEN_TRANSACTION, ~"BEGIN; SELECT set_config('kura.txn', '1', true)").
+-define(MARKER, ~"SELECT current_setting('kura.txn', true)").
 
 -doc "What this backend supports. Read by `kura_capabilities`.".
 -spec capabilities() -> kura_capabilities:capability_set().
@@ -196,12 +202,28 @@ run(Holder, Sql, Params, Opts) ->
     reraised(call(Holder, {run, Sql, Params, Opts}, infinity)).
 
 -doc """
+Begin a transaction on a held connection. Used by `m:kura_driver_minato`.
+
+Answers what the `BEGIN` answered. It goes as one simple query together with a
+transaction-local setting, `kura.txn`, so it costs one round trip. The setting
+is what tells a statement tagged `ROLLBACK` that left the connection in a
+transaction apart: `ROLLBACK TO SAVEPOINT` keeps it, while `ROLLBACK AND CHAIN`
+and `ABORT AND CHAIN` start a new transaction without it.
+""".
+-spec open_transaction(pid()) -> dynamic().
+open_transaction(Holder) ->
+    reraised(call(Holder, {run, opening, ?OPEN_TRANSACTION, [], #{}}, infinity)).
+
+-doc """
 Run a statement on a held connection that is inside a transaction, and say what
 became of the transaction after it. Used by `m:kura_driver_minato`.
 
 Answers `ended` without running the statement when the connection is idle, or
-when an earlier statement through this function ended the transaction, so a
-statement meant for that transaction never runs outside it. Otherwise
+once a call to this function has found the transaction ended, so a statement
+meant for that transaction never runs outside it. The transaction is expected to
+have been begun by `open_transaction/1`: a statement tagged `ROLLBACK` that
+leaves the connection in a transaction without its setting has replaced it, and
+counts as having ended it. Otherwise
 `{Answer, Status}`, where `Answer` is what `run/4` would answer and `Status` lets
 the caller see a statement that ended the transaction itself.
 """.
@@ -255,6 +277,8 @@ hold(Pool, Owner, Timeout) ->
 -spec held(kura_pool:name(), minato_conn:conn(), reference(), open | ended) -> ok.
 held(Pool, Conn, Monitor, Transaction) ->
     receive
+        {call, Alias, {run, opening, Sql, Params, Opts}} ->
+            answered(Pool, {Conn, Monitor, Transaction}, Alias, {opening, Sql, Params, Opts});
         {call, Alias, {run, Sql, Params, Opts}} ->
             answered(Pool, {Conn, Monitor, Transaction}, Alias, {anywhere, Sql, Params, Opts});
         {call, Alias, {run_in_transaction, Sql, Params, Opts}} ->
@@ -265,7 +289,7 @@ held(Pool, Conn, Monitor, Transaction) ->
                     );
                 _Ended ->
                     Alias ! {Alias, ended},
-                    held(Pool, Conn, Monitor, Transaction)
+                    held(Pool, Conn, Monitor, ended)
             end;
         {call, Alias, checkin} ->
             ok = minato_pool:checkin(Pool, Conn),
@@ -284,18 +308,24 @@ held(Pool, Conn, Monitor, Transaction) ->
     kura_pool:name(),
     {minato_conn:conn(), reference(), open | ended},
     reference(),
-    {anywhere | transaction, iodata(), [term()], map()}
+    {within(), iodata(), [term()], map()}
 ) -> ok.
 answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts}) ->
-    try ran(Conn, Sql, Params, Opts) of
+    try ran(Within, Conn, Sql, Params, Opts) of
         {lost, Answer} ->
             minato_pool:discard(Pool, Conn),
             Alias ! {Alias, reported(Within, Answer, unknown)},
             ok;
         {continue, Answer, Next} ->
-            Status = became(Answer, minato_conn:transaction_status(Next)),
-            Alias ! {Alias, reported(Within, Answer, Status)},
-            held(Pool, Next, Monitor, still(Within, Status, Transaction))
+            case became(Within, Answer, Next) of
+                {lost, Status} ->
+                    minato_pool:discard(Pool, Next),
+                    Alias ! {Alias, reported(Within, Answer, Status)},
+                    ok;
+                {Status, Checked} ->
+                    Alias ! {Alias, reported(Within, Answer, Status)},
+                    held(Pool, Checked, Monitor, still(Within, Status, Transaction))
+            end
     catch
         Class:Reason:Stack ->
             minato_pool:discard(Pool, Conn),
@@ -303,22 +333,47 @@ answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts})
             ok
     end.
 
--spec became(dynamic(), minato_protocol:transaction_status()) -> transaction_status().
-became(#{command := commit}, _Status) -> ended;
-became(_Answer, idle) -> ended;
-became(_Answer, Status) -> Status.
+-spec became(within(), dynamic(), minato_conn:conn()) ->
+    {transaction_status(), minato_conn:conn()} | {lost, ended}.
+became(_Within, #{command := commit}, Conn) ->
+    {ended, Conn};
+became(transaction, #{command := rollback}, Conn) ->
+    case minato_conn:transaction_status(Conn) of
+        idle -> {ended, Conn};
+        _Chained -> marked(Conn)
+    end;
+became(_Within, _Answer, Conn) ->
+    case minato_conn:transaction_status(Conn) of
+        idle -> {ended, Conn};
+        Status -> {Status, Conn}
+    end.
 
--spec still(anywhere | transaction, transaction_status(), open | ended) -> open | ended.
+-spec marked(minato_conn:conn()) -> {transaction_status(), minato_conn:conn()} | {lost, ended}.
+marked(Conn) ->
+    case minato_query:simple(Conn, ?MARKER) of
+        {ok, [#{rows := [{~"1"}]}], Next} -> {transaction, Next};
+        {ok, _Replaced, Next} -> {ended, Next};
+        {error, _Reason, Next} -> {ended, Next};
+        {error, _Reason} -> {lost, ended}
+    end.
+
+-spec still(within(), transaction_status(), open | ended) -> open | ended.
 still(transaction, ended, _Transaction) -> ended;
 still(_Within, _Status, Transaction) -> Transaction.
 
--spec reported(anywhere | transaction, dynamic(), transaction_status()) -> dynamic().
-reported(anywhere, Answer, _Status) -> Answer;
-reported(transaction, Answer, Status) -> {reported, Answer, Status}.
+-spec reported(within(), dynamic(), transaction_status()) -> dynamic().
+reported(transaction, Answer, Status) -> {reported, Answer, Status};
+reported(_Within, Answer, _Status) -> Answer.
 
--spec ran(minato_conn:conn(), iodata(), [term()], map()) ->
+-spec ran(within(), minato_conn:conn(), iodata(), [term()], map()) ->
     {continue, dynamic(), minato_conn:conn()} | {lost, dynamic()}.
-ran(Conn, Sql, Params, Opts) ->
+ran(opening, Conn, Sql, _Params, _Opts) ->
+    case minato_query:simple(Conn, Sql) of
+        {ok, [Began | _Marked], Next} -> {continue, Began, Next};
+        {error, Reason, Next} -> {continue, {error, Reason}, Next};
+        {error, Reason} -> {lost, {error, Reason}}
+    end;
+ran(_Within, Conn, Sql, Params, Opts) ->
     case minato_query:query(Conn, Sql, Params, Opts) of
         {ok, Result, Next} -> {continue, Result, Next};
         {error, Reason, Next} -> {continue, {error, Reason}, Next};

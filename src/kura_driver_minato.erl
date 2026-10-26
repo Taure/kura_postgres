@@ -51,10 +51,12 @@ The status and the tag are read rather than the SQL text, so a statement is
 caught however it is spelled. The tag is what catches `COMMIT AND CHAIN`, which
 leaves a new transaction open, so the connection never reads as `idle`; that
 transaction is rolled back when the connection is checked in.
-`ROLLBACK AND CHAIN` is not caught: its tag is `ROLLBACK`, the same as
-`ROLLBACK TO SAVEPOINT`, and the connection stays in a transaction. The work
-before it is thrown away, and the work after it runs in the new transaction and
-commits with it.
+`ROLLBACK AND CHAIN` and `ABORT AND CHAIN` answer with the tag `ROLLBACK`, as
+`ROLLBACK TO SAVEPOINT` does. `transaction/4` begins with a transaction-local
+setting sent in the same round trip as its `BEGIN`, and only a statement tagged
+`ROLLBACK` that leaves the connection in a transaction is followed by one more
+query to read it back: a savepoint rollback keeps the setting, a chained
+rollback has replaced the transaction and lost it, and raises the same error.
 
 This covers transactions `transaction/4` opens. A sandboxed test runs its
 statements through `query_on/4`, which does not check.
@@ -179,7 +181,7 @@ outermost(Pool, Fun) ->
 inside(Pool, Holder, Fun) ->
     ok = kura_pool_minato:in_transaction(Pool, Holder),
     try
-        ok = expect(statement(Holder, ~"BEGIN"), 'begin', begin_failed),
+        ok = expect(opened(Holder), 'begin', begin_failed),
         Value = Fun(),
         committed(Holder, Value)
     catch
@@ -290,10 +292,10 @@ within(Holder, SQL) ->
         Class:_ -> {raised, Class}
     end.
 
--spec statement(pid(), iodata()) -> dynamic().
-statement(Holder, SQL) ->
+-spec opened(pid()) -> dynamic().
+opened(Holder) ->
     try
-        kura_pool_minato:run(Holder, SQL, [], #{})
+        kura_pool_minato:open_transaction(Holder)
     catch
         Class:_ -> {raised, Class}
     end.

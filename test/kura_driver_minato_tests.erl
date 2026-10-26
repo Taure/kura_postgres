@@ -82,6 +82,19 @@ nested_test_() ->
                 fun caught_chain_runs_nothing_more/0},
             {"cleanup after the transaction ended sends nothing to the server",
                 fun ended_cleanup_stays_off_the_server/0},
+            {"a ROLLBACK AND CHAIN in a transaction raises and keeps nothing", fun() ->
+                ended_by(~"ROLLBACK AND CHAIN", [])
+            end},
+            {"an ABORT AND CHAIN in a transaction raises and keeps nothing", fun() ->
+                ended_by(~"ABORT AND CHAIN", [])
+            end},
+            {"a ROLLBACK AND CHAIN in a nested transaction raises and keeps nothing", fun() ->
+                nested_ended_by(~"ROLLBACK AND CHAIN", [])
+            end},
+            {"a function that catches a ROLLBACK AND CHAIN commits nothing after it",
+                fun caught_rollback_chain_commits_nothing/0},
+            {"the caller's own ROLLBACK TO SAVEPOINT leaves the transaction open",
+                fun own_rollback_to_keeps_transaction/0},
             {"a refused ROLLBACK TO rolls back the whole transaction",
                 fun refused_rollback_to_rolls_back_everything/0},
             {"a ROLLBACK TO that raises keeps the original exception",
@@ -476,6 +489,31 @@ caught_chain_runs_nothing_more() ->
         end)
     ),
     ?assertEqual([1], ids(nested_table())).
+
+caught_rollback_chain_commits_nothing() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement},
+                sql(~"ROLLBACK AND CHAIN")
+            ),
+            ?assertError({kura_driver_minato, transaction_ended_by_statement}, insert(2)),
+            ok
+        end)
+    ),
+    ?assertEqual([], ids(nested_table())).
+
+own_rollback_to_keeps_transaction() ->
+    ok = transaction(fun() ->
+        ok = insert(1),
+        ok = sql(~"SAVEPOINT caller_savepoint"),
+        ok = insert(2),
+        ok = sql(~"ROLLBACK TO SAVEPOINT caller_savepoint"),
+        insert(3)
+    end),
+    ?assertEqual([1, 3], ids(nested_table())).
 
 ended_cleanup_stays_off_the_server() ->
     with_fake_holder(fun ended_after_savepoint/1, fun() ->

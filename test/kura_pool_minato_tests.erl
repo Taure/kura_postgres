@@ -39,7 +39,11 @@ with_pool_test_() ->
             {"run_in_transaction/4 runs nothing outside a transaction",
                 fun run_in_transaction_refuses_outside/0},
             {"run_in_transaction/4 runs nothing after a COMMIT AND CHAIN",
-                fun run_in_transaction_refuses_after_chain/0}
+                fun run_in_transaction_refuses_after_chain/0},
+            {"run_in_transaction/4 stays refused after a new BEGIN",
+                fun run_in_transaction_stays_refused/0},
+            {"run_in_transaction/4 tells a chained rollback from a savepoint rollback",
+                fun run_in_transaction_tells_rollbacks_apart/0}
         ]
     end}.
 
@@ -201,6 +205,37 @@ run_in_transaction_refuses_after_chain() ->
             Conn, ~"SELECT now() = statement_timestamp()", [], #{}
         ),
         ?assertEqual([false], tuple_to_list(Row))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_stays_refused() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{})),
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{}))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_tells_rollbacks_apart() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        ?assertMatch(#{command := 'begin'}, kura_pool_minato:open_transaction(Conn)),
+        ?assertMatch(
+            {#{command := savepoint}, transaction},
+            kura_pool_minato:run_in_transaction(Conn, ~"SAVEPOINT caller", [], #{})
+        ),
+        ?assertMatch(
+            {#{command := rollback}, transaction},
+            kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK TO SAVEPOINT caller", [], #{})
+        ),
+        ?assertMatch(
+            {#{command := rollback}, ended},
+            kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK AND CHAIN", [], #{})
+        ),
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{}))
     after
         ok = kura_pool_minato:checkin(?POOL, Token)
     end.
