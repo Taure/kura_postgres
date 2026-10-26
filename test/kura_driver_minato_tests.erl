@@ -48,7 +48,69 @@ nested_test_() ->
             {"a RELEASE the server refuses raises", fun refused_release_raises/0},
             {"a cleanup that raises keeps the original exception",
                 fun raised_cleanup_keeps_original/0},
-            {"a SAVEPOINT that raises is named like a refused one", fun raised_savepoint_is_named/0}
+            {"a SAVEPOINT that raises is named like a refused one",
+                fun raised_savepoint_is_named/0},
+            {"a COMMIT in a transaction raises and keeps the work before it", fun() ->
+                ended_by(~"COMMIT", [1])
+            end},
+            {"an END in a transaction raises and keeps the work before it", fun() ->
+                ended_by(~"END", [1])
+            end},
+            {"a ROLLBACK in a transaction raises and keeps nothing", fun() ->
+                ended_by(~"ROLLBACK", [])
+            end},
+            {"a COMMIT in a nested transaction raises and keeps the work before it", fun() ->
+                nested_ended_by(~"COMMIT", [1, 2])
+            end},
+            {"an END in a nested transaction raises and keeps the work before it", fun() ->
+                nested_ended_by(~"END", [1, 2])
+            end},
+            {"a ROLLBACK in a nested transaction raises and keeps nothing", fun() ->
+                nested_ended_by(~"ROLLBACK", [])
+            end},
+            {"a ROLLBACK after a failed statement raises", fun rollback_after_failure_raises/0},
+            {"a function that catches the end runs nothing more in autocommit",
+                fun caught_end_runs_nothing_more/0},
+            {"a nested transaction after a caught end does not start",
+                fun caught_end_starts_no_savepoint/0},
+            {"a COMMIT AND CHAIN in a transaction raises and keeps the work before it", fun() ->
+                ended_by(~"COMMIT AND CHAIN", [1])
+            end},
+            {"a COMMIT AND CHAIN in a nested transaction raises and keeps the work before it",
+                fun() -> nested_ended_by(~"COMMIT AND CHAIN", [1, 2]) end},
+            {"a function that catches a COMMIT AND CHAIN runs nothing more",
+                fun caught_chain_runs_nothing_more/0},
+            {"cleanup after the transaction ended sends nothing to the server",
+                fun ended_cleanup_stays_off_the_server/0},
+            {"a ROLLBACK AND CHAIN in a transaction raises and keeps nothing", fun() ->
+                ended_by(~"ROLLBACK AND CHAIN", [])
+            end},
+            {"an ABORT AND CHAIN in a transaction raises and keeps nothing", fun() ->
+                ended_by(~"ABORT AND CHAIN", [])
+            end},
+            {"a ROLLBACK AND CHAIN in a nested transaction raises and keeps nothing", fun() ->
+                nested_ended_by(~"ROLLBACK AND CHAIN", [])
+            end},
+            {"a function that catches a ROLLBACK AND CHAIN commits nothing after it",
+                fun caught_rollback_chain_commits_nothing/0},
+            {"the caller's own ROLLBACK TO SAVEPOINT leaves the transaction open",
+                fun own_rollback_to_keeps_transaction/0},
+            {"SET TRANSACTION ISOLATION LEVEL works as the first statement", fun() ->
+                first_set_transaction(
+                    ~"SET TRANSACTION ISOLATION LEVEL SERIALIZABLE",
+                    ~"transaction_isolation",
+                    ~"serializable"
+                )
+            end},
+            {"SET TRANSACTION READ ONLY works as the first statement", fun() ->
+                first_set_transaction(
+                    ~"SET TRANSACTION READ ONLY", ~"transaction_read_only", ~"on"
+                )
+            end},
+            {"a refused ROLLBACK TO rolls back the whole transaction",
+                fun refused_rollback_to_rolls_back_everything/0},
+            {"a ROLLBACK TO that raises keeps the original exception",
+                fun raised_rollback_to_keeps_original/0}
         ]}
     end}.
 
@@ -303,10 +365,81 @@ raised_nested_releases_savepoint() ->
     end).
 
 refused_release_raises() ->
+    with_fake_holder(fun refuses_release/1, fun() ->
+        ?assertError(
+            {kura_driver_minato, {release_failed, {pgsql_error, #{code := ~"XX000"}}}},
+            transaction(fun() -> ok end)
+        )
+    end).
+
+ended_by(Statement, Kept) ->
     ?assertError(
-        {kura_driver_minato, {release_failed, {pgsql_error, #{code := ~"25P01"}}}},
-        transaction(fun() -> transaction(fun() -> sql(~"ROLLBACK") end) end)
-    ).
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ok = sql(Statement),
+            insert(2)
+        end)
+    ),
+    ?assertEqual(Kept, ids(nested_table())),
+    ?assertEqual(undefined, kura_pool_minato:transaction_conn(?POOL)).
+
+nested_ended_by(Statement, Kept) ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ok = transaction(fun() ->
+                ok = insert(2),
+                ok = sql(Statement),
+                insert(3)
+            end),
+            insert(4)
+        end)
+    ),
+    ?assertEqual(Kept, ids(nested_table())).
+
+rollback_after_failure_raises() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            {error, {pgsql_error, _}} = query(~"SELECT 1 / 0", []),
+            ok = sql(~"ROLLBACK"),
+            insert(2)
+        end)
+    ),
+    ?assertEqual([], ids(nested_table())).
+
+caught_end_runs_nothing_more() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement}, sql(~"COMMIT")
+            ),
+            ?assertError({kura_driver_minato, transaction_ended_by_statement}, insert(2)),
+            ok
+        end)
+    ),
+    ?assertEqual([1], ids(nested_table())).
+
+caught_end_starts_no_savepoint() ->
+    Self = self(),
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement}, sql(~"ROLLBACK")
+            ),
+            transaction(fun() -> Self ! nested_ran end)
+        end)
+    ),
+    receive
+        nested_ran -> error(nested_function_ran)
+    after 0 -> ok
+    end.
 
 ended_commit_raises_unknown() ->
     Table = table(~"kura_driver_ended"),
@@ -355,11 +488,109 @@ fails_after_savepoint(_Cleanup) -> {raised, error, lost, []}.
 
 fails_always(_SQL) -> {raised, error, lost, []}.
 
+caught_chain_runs_nothing_more() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement}, sql(~"COMMIT AND CHAIN")
+            ),
+            ?assertError({kura_driver_minato, transaction_ended_by_statement}, insert(2)),
+            ok
+        end)
+    ),
+    ?assertEqual([1], ids(nested_table())).
+
+caught_rollback_chain_commits_nothing() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement},
+                sql(~"ROLLBACK AND CHAIN")
+            ),
+            ?assertError({kura_driver_minato, transaction_ended_by_statement}, insert(2)),
+            ok
+        end)
+    ),
+    ?assertEqual([], ids(nested_table())).
+
+first_set_transaction(Statement, Setting, Expected) ->
+    ?assertEqual(
+        Expected,
+        transaction(fun() ->
+            ok = sql(Statement),
+            #{rows := [#{setting := Value}]} = query(
+                ~"SELECT current_setting($1) AS setting", [Setting]
+            ),
+            Value
+        end)
+    ).
+
+own_rollback_to_keeps_transaction() ->
+    ok = transaction(fun() ->
+        ok = insert(1),
+        ok = sql(~"SAVEPOINT caller_savepoint"),
+        ok = insert(2),
+        ok = sql(~"ROLLBACK TO SAVEPOINT caller_savepoint"),
+        insert(3)
+    end),
+    ?assertEqual([1, 3], ids(nested_table())).
+
+ended_cleanup_stays_off_the_server() ->
+    with_fake_holder(fun ended_after_savepoint/1, fun() ->
+        ?assertThrow(inner, transaction(fun() -> throw(inner) end)),
+        ?assertEqual(
+            [
+                {run_in_transaction, ~"SAVEPOINT"},
+                {run_in_transaction, ~"ROLLBACK TO SAVEPOINT"}
+            ],
+            fake_ran()
+        )
+    end).
+
+refused_rollback_to_rolls_back_everything() ->
+    ?assertError(
+        {kura_driver_minato, {rollback_to_failed, {pgsql_error, #{code := ~"3B001"}}}},
+        transaction(fun() ->
+            ok = insert(1),
+            ok = sql(~"SAVEPOINT caller_savepoint"),
+            transaction(fun() ->
+                ok = insert(2),
+                ok = sql(~"RELEASE SAVEPOINT caller_savepoint"),
+                throw(inner)
+            end)
+        end)
+    ),
+    ?assertEqual([], ids(nested_table())).
+
+raised_rollback_to_keeps_original() ->
+    with_fake_holder(fun fails_after_savepoint/1, fun() ->
+        ?assertThrow(original, transaction(fun() -> throw(original) end)),
+        ?assertEqual(
+            [
+                {run_in_transaction, ~"SAVEPOINT"},
+                {run_in_transaction, ~"ROLLBACK TO SAVEPOINT"}
+            ],
+            fake_ran()
+        )
+    end).
+
+ended_after_savepoint(<<"SAVEPOINT ", _/binary>>) -> #{command => savepoint};
+ended_after_savepoint(_Cleanup) -> ended.
+
+refuses_release(<<"SAVEPOINT ", _/binary>>) -> #{command => savepoint};
+refuses_release(<<"ROLLBACK TO SAVEPOINT ", _/binary>>) -> #{command => rollback};
+refuses_release(_Release) -> {error, {pgsql_error, #{code => ~"XX000"}}}.
+
 %% Stands in for the transaction's holder, answering every statement with Answer.
 with_fake_holder(Answer, Test) ->
     transaction(fun() ->
         Holder = held(),
-        Fake = spawn_link(fun() -> answering(Answer) end),
+        Self = self(),
+        Fake = spawn_link(fun() -> answering(Answer, Self) end),
         ok = kura_pool_minato:in_transaction(?POOL, Fake),
         try
             Test()
@@ -370,11 +601,29 @@ with_fake_holder(Answer, Test) ->
         end
     end).
 
-answering(Answer) ->
+answering(Answer, Owner) ->
     receive
         {call, Alias, {run, SQL, _Params, _Opts}} ->
+            Owner ! {fake_ran, run, iolist_to_binary(SQL)},
             Alias ! {Alias, Answer(iolist_to_binary(SQL))},
-            answering(Answer)
+            answering(Answer, Owner);
+        {call, Alias, {run_in_transaction, SQL, _Params, _Opts}} ->
+            Owner ! {fake_ran, run_in_transaction, iolist_to_binary(SQL)},
+            Alias ! {Alias, reported(Answer(iolist_to_binary(SQL)))},
+            answering(Answer, Owner)
+    end.
+
+reported({raised, _Class, _Reason, _Stack} = Raised) -> Raised;
+reported(ended) -> ended;
+reported(Answer) -> {reported, Answer, transaction}.
+
+%% The statements the fake holder was sent, without their savepoint names.
+fake_ran() ->
+    receive
+        {fake_ran, Kind, SQL} ->
+            [Statement | _Name] = binary:split(SQL, ~" kura_savepoint_"),
+            [{Kind, Statement} | fake_ran()]
+    after 0 -> []
     end.
 
 held() ->
