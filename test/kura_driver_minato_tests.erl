@@ -72,7 +72,20 @@ nested_test_() ->
             {"a function that catches the end runs nothing more in autocommit",
                 fun caught_end_runs_nothing_more/0},
             {"a nested transaction after a caught end does not start",
-                fun caught_end_starts_no_savepoint/0}
+                fun caught_end_starts_no_savepoint/0},
+            {"a COMMIT AND CHAIN in a transaction raises and keeps the work before it", fun() ->
+                ended_by(~"COMMIT AND CHAIN", [1])
+            end},
+            {"a COMMIT AND CHAIN in a nested transaction raises and keeps the work before it",
+                fun() -> nested_ended_by(~"COMMIT AND CHAIN", [1, 2]) end},
+            {"a function that catches a COMMIT AND CHAIN runs nothing more",
+                fun caught_chain_runs_nothing_more/0},
+            {"cleanup after the transaction ended sends nothing to the server",
+                fun ended_cleanup_stays_off_the_server/0},
+            {"a refused ROLLBACK TO rolls back the whole transaction",
+                fun refused_rollback_to_rolls_back_everything/0},
+            {"a ROLLBACK TO that raises keeps the original exception",
+                fun raised_rollback_to_keeps_original/0}
         ]}
     end}.
 
@@ -450,14 +463,72 @@ fails_after_savepoint(_Cleanup) -> {raised, error, lost, []}.
 
 fails_always(_SQL) -> {raised, error, lost, []}.
 
+caught_chain_runs_nothing_more() ->
+    ?assertError(
+        {kura_driver_minato, transaction_ended_by_statement},
+        transaction(fun() ->
+            ok = insert(1),
+            ?assertError(
+                {kura_driver_minato, transaction_ended_by_statement}, sql(~"COMMIT AND CHAIN")
+            ),
+            ?assertError({kura_driver_minato, transaction_ended_by_statement}, insert(2)),
+            ok
+        end)
+    ),
+    ?assertEqual([1], ids(nested_table())).
+
+ended_cleanup_stays_off_the_server() ->
+    with_fake_holder(fun ended_after_savepoint/1, fun() ->
+        ?assertThrow(inner, transaction(fun() -> throw(inner) end)),
+        ?assertEqual(
+            [
+                {run_in_transaction, ~"SAVEPOINT"},
+                {run_in_transaction, ~"ROLLBACK TO SAVEPOINT"}
+            ],
+            fake_ran()
+        )
+    end).
+
+refused_rollback_to_rolls_back_everything() ->
+    ?assertError(
+        {kura_driver_minato, {rollback_to_failed, {pgsql_error, #{code := ~"3B001"}}}},
+        transaction(fun() ->
+            ok = insert(1),
+            ok = sql(~"SAVEPOINT caller_savepoint"),
+            transaction(fun() ->
+                ok = insert(2),
+                ok = sql(~"RELEASE SAVEPOINT caller_savepoint"),
+                throw(inner)
+            end)
+        end)
+    ),
+    ?assertEqual([], ids(nested_table())).
+
+raised_rollback_to_keeps_original() ->
+    with_fake_holder(fun fails_after_savepoint/1, fun() ->
+        ?assertThrow(original, transaction(fun() -> throw(original) end)),
+        ?assertEqual(
+            [
+                {run_in_transaction, ~"SAVEPOINT"},
+                {run_in_transaction, ~"ROLLBACK TO SAVEPOINT"}
+            ],
+            fake_ran()
+        )
+    end).
+
+ended_after_savepoint(<<"SAVEPOINT ", _/binary>>) -> #{command => savepoint};
+ended_after_savepoint(_Cleanup) -> ended.
+
 refuses_release(<<"SAVEPOINT ", _/binary>>) -> #{command => savepoint};
+refuses_release(<<"ROLLBACK TO SAVEPOINT ", _/binary>>) -> #{command => rollback};
 refuses_release(_Release) -> {error, {pgsql_error, #{code => ~"XX000"}}}.
 
 %% Stands in for the transaction's holder, answering every statement with Answer.
 with_fake_holder(Answer, Test) ->
     transaction(fun() ->
         Holder = held(),
-        Fake = spawn_link(fun() -> answering(Answer) end),
+        Self = self(),
+        Fake = spawn_link(fun() -> answering(Answer, Self) end),
         ok = kura_pool_minato:in_transaction(?POOL, Fake),
         try
             Test()
@@ -468,18 +539,30 @@ with_fake_holder(Answer, Test) ->
         end
     end).
 
-answering(Answer) ->
+answering(Answer, Owner) ->
     receive
         {call, Alias, {run, SQL, _Params, _Opts}} ->
+            Owner ! {fake_ran, run, iolist_to_binary(SQL)},
             Alias ! {Alias, Answer(iolist_to_binary(SQL))},
-            answering(Answer);
+            answering(Answer, Owner);
         {call, Alias, {run_in_transaction, SQL, _Params, _Opts}} ->
+            Owner ! {fake_ran, run_in_transaction, iolist_to_binary(SQL)},
             Alias ! {Alias, reported(Answer(iolist_to_binary(SQL)))},
-            answering(Answer)
+            answering(Answer, Owner)
     end.
 
 reported({raised, _Class, _Reason, _Stack} = Raised) -> Raised;
+reported(ended) -> ended;
 reported(Answer) -> {reported, Answer, transaction}.
+
+%% The statements the fake holder was sent, without their savepoint names.
+fake_ran() ->
+    receive
+        {fake_ran, Kind, SQL} ->
+            [Statement | _Name] = binary:split(SQL, ~" kura_savepoint_"),
+            [{Kind, Statement} | fake_ran()]
+    after 0 -> []
+    end.
 
 held() ->
     case kura_pool_minato:transaction_conn(?POOL) of

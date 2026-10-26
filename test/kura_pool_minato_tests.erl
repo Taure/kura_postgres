@@ -37,7 +37,9 @@ with_pool_test_() ->
             {"run_in_transaction/4 reports the transaction status after a statement",
                 fun run_in_transaction_reports_status/0},
             {"run_in_transaction/4 runs nothing outside a transaction",
-                fun run_in_transaction_refuses_outside/0}
+                fun run_in_transaction_refuses_outside/0},
+            {"run_in_transaction/4 runs nothing after a COMMIT AND CHAIN",
+                fun run_in_transaction_refuses_after_chain/0}
         ]
     end}.
 
@@ -162,7 +164,7 @@ run_in_transaction_reports_status() ->
             kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1 / 0", [], #{})
         ),
         ?assertMatch(
-            {#{command := rollback}, idle},
+            {#{command := rollback}, ended},
             kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK", [], #{})
         )
     after
@@ -182,6 +184,23 @@ run_in_transaction_refuses_outside() ->
             Conn, ~"SELECT to_regclass('pg_temp.kura_pool_minato_refused') IS NULL", [], #{}
         ),
         ?assertEqual([true], tuple_to_list(Row))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_refuses_after_chain() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        ?assertMatch(
+            {#{command := commit}, ended},
+            kura_pool_minato:run_in_transaction(Conn, ~"COMMIT AND CHAIN", [], #{})
+        ),
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{})),
+        #{rows := [Row]} = kura_pool_minato:run(
+            Conn, ~"SELECT now() = statement_timestamp()", [], #{}
+        ),
+        ?assertEqual([false], tuple_to_list(Row))
     after
         ok = kura_pool_minato:checkin(?POOL, Token)
     end.

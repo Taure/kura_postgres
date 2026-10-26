@@ -26,8 +26,8 @@ later. `give_away/3` moves the watch rather than the socket, because the
 socket never left the holder.
 
 `run_in_transaction/4` is `run/4` for a statement meant for an open
-transaction: the holder refuses it on a connection that is no longer in one, and
-answers with the transaction status the server reported after it.
+transaction: the holder refuses it once that transaction has ended, and answers
+with what became of the transaction after it.
 
 A `checkin/2` hands the connection to minato, which rolls back an open
 transaction and resets the session before it lends the connection again.
@@ -50,12 +50,17 @@ transaction and resets the session before it lends the connection again.
 -export_type([transaction_status/0]).
 
 -doc """
-What the server said about the transaction after a statement, from the status
-byte of its `ReadyForQuery`: `idle` outside one, `transaction` inside one,
-`failed` inside one a statement has already failed in. `unknown` when no answer
-came back to read it from.
+What became of the transaction a statement was run in. Used by
+`m:kura_driver_minato`.
+
+`transaction` and `failed` are the status byte of the `ReadyForQuery` after it:
+still open, or open with a statement already failed in it. `ended` is a
+transaction the statement ended: the connection went back to `idle`, or the
+statement's tag was `COMMIT`, which `COMMIT AND CHAIN` answers while leaving a
+new transaction open that is not the one the caller began. `unknown` when no
+answer came back to read it from.
 """.
--type transaction_status() :: minato_protocol:transaction_status() | unknown.
+-type transaction_status() :: transaction | failed | ended | unknown.
 
 -define(CALL_TIMEOUT, 30000).
 
@@ -192,12 +197,13 @@ run(Holder, Sql, Params, Opts) ->
 
 -doc """
 Run a statement on a held connection that is inside a transaction, and say what
-the server reported about the transaction after it.
+became of the transaction after it. Used by `m:kura_driver_minato`.
 
-Answers `ended` without running the statement when the connection is no longer
-in a transaction, so a statement meant for one never runs in autocommit.
-Otherwise `{Answer, Status}`, where `Answer` is what `run/4` would answer and
-`Status` lets the caller see a statement that ended the transaction itself.
+Answers `ended` without running the statement when the connection is idle, or
+when an earlier statement through this function ended the transaction, so a
+statement meant for that transaction never runs outside it. Otherwise
+`{Answer, Status}`, where `Answer` is what `run/4` would answer and `Status` lets
+the caller see a statement that ended the transaction itself.
 """.
 -spec run_in_transaction(pid(), iodata(), [term()], map()) ->
     ended | {dynamic(), transaction_status()}.
@@ -240,24 +246,26 @@ hold(Pool, Owner, Timeout) ->
     case minato_pool:checkout(Pool, Timeout) of
         {ok, Conn} ->
             Owner ! {holding, self()},
-            held(Pool, Conn, erlang:monitor(process, Owner));
+            held(Pool, Conn, erlang:monitor(process, Owner), open);
         {error, Reason} ->
             Owner ! {failed, self(), Reason},
             ok
     end.
 
--spec held(kura_pool:name(), minato_conn:conn(), reference()) -> ok.
-held(Pool, Conn, Monitor) ->
+-spec held(kura_pool:name(), minato_conn:conn(), reference(), open | ended) -> ok.
+held(Pool, Conn, Monitor, Transaction) ->
     receive
         {call, Alias, {run, Sql, Params, Opts}} ->
-            answered(Pool, Conn, Monitor, Alias, {anywhere, Sql, Params, Opts});
+            answered(Pool, {Conn, Monitor, Transaction}, Alias, {anywhere, Sql, Params, Opts});
         {call, Alias, {run_in_transaction, Sql, Params, Opts}} ->
-            case minato_conn:transaction_status(Conn) of
-                idle ->
+            case {Transaction, minato_conn:transaction_status(Conn)} of
+                {open, Status} when Status =/= idle ->
+                    answered(
+                        Pool, {Conn, Monitor, Transaction}, Alias, {transaction, Sql, Params, Opts}
+                    );
+                _Ended ->
                     Alias ! {Alias, ended},
-                    held(Pool, Conn, Monitor);
-                _Open ->
-                    answered(Pool, Conn, Monitor, Alias, {transaction, Sql, Params, Opts})
+                    held(Pool, Conn, Monitor, Transaction)
             end;
         {call, Alias, checkin} ->
             ok = minato_pool:checkin(Pool, Conn),
@@ -267,33 +275,42 @@ held(Pool, Conn, Monitor) ->
         {call, Alias, {give_away, NewOwner}} ->
             true = erlang:demonitor(Monitor, [flush]),
             Alias ! {Alias, ok},
-            held(Pool, Conn, erlang:monitor(process, NewOwner));
+            held(Pool, Conn, erlang:monitor(process, NewOwner), Transaction);
         {'DOWN', Monitor, process, _Owner, _Reason} ->
             minato_pool:discard(Pool, Conn)
     end.
 
 -spec answered(
     kura_pool:name(),
-    minato_conn:conn(),
-    reference(),
+    {minato_conn:conn(), reference(), open | ended},
     reference(),
     {anywhere | transaction, iodata(), [term()], map()}
 ) -> ok.
-answered(Pool, Conn, Monitor, Alias, {Within, Sql, Params, Opts}) ->
+answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts}) ->
     try ran(Conn, Sql, Params, Opts) of
         {lost, Answer} ->
             minato_pool:discard(Pool, Conn),
             Alias ! {Alias, reported(Within, Answer, unknown)},
             ok;
         {continue, Answer, Next} ->
-            Alias ! {Alias, reported(Within, Answer, minato_conn:transaction_status(Next))},
-            held(Pool, Next, Monitor)
+            Status = became(Answer, minato_conn:transaction_status(Next)),
+            Alias ! {Alias, reported(Within, Answer, Status)},
+            held(Pool, Next, Monitor, still(Within, Status, Transaction))
     catch
         Class:Reason:Stack ->
             minato_pool:discard(Pool, Conn),
             Alias ! {Alias, {raised, Class, Reason, Stack}},
             ok
     end.
+
+-spec became(dynamic(), minato_protocol:transaction_status()) -> transaction_status().
+became(#{command := commit}, _Status) -> ended;
+became(_Answer, idle) -> ended;
+became(_Answer, Status) -> Status.
+
+-spec still(anywhere | transaction, transaction_status(), open | ended) -> open | ended.
+still(transaction, ended, _Transaction) -> ended;
+still(_Within, _Status, Transaction) -> Transaction.
 
 -spec reported(anywhere | transaction, dynamic(), transaction_status()) -> dynamic().
 reported(anywhere, Answer, _Status) -> Answer;
