@@ -23,7 +23,10 @@ with_pool_test_() ->
             {"with_conn runs the fun and checks back in", fun with_conn_roundtrip/0},
             {"sequential checkouts reuse a connection from the pool", fun sequential_checkouts/0},
             {"give_away transfers ownership to another process", fun give_away_transfers/0},
-            {"start_pool is idempotent on a running pool", fun start_pool_idempotent/0},
+            {"start_pool reports a running pool as already started",
+                fun start_pool_reports_already_started/0},
+            {"a second start with other options leaves the running pool as it is",
+                fun second_start_keeps_the_running_pool/0},
             {"an owner's death discards the connection and its session state",
                 fun owner_death_discards_connection/0},
             {"minato's server-side cancellation reaches the caller of run/4",
@@ -460,9 +463,28 @@ checkout_timeout_kills_the_holder() ->
 slow_checkout_stop(_Event, _Measurements, #{outcome := ok}, Sleep) -> timer:sleep(Sleep);
 slow_checkout_stop(_Event, _Measurements, _Metadata, _Sleep) -> ok.
 
-start_pool_idempotent() ->
-    %% Already started in setup. Re-calling must return ok with the existing pid.
-    ?assertMatch({ok, _Pid}, kura_pool_minato:start_pool(?POOL, ?CONFIG)).
+start_pool_reports_already_started() ->
+    Running = whereis_pool(?POOL),
+    ?assertEqual(
+        {error, {already_started, Running}}, kura_pool_minato:start_pool(?POOL, ?CONFIG)
+    ).
+
+%% Two repos naming one pool: the second start must not look like a pool
+%% started with its own settings.
+second_start_keeps_the_running_pool() ->
+    Running = whereis_pool(?POOL),
+    Other = ?CONFIG,
+    ?assertEqual(
+        {error, {already_started, Running}},
+        kura_pool_minato:start_pool(?POOL, Other#{user => "someone_else", password => "other"})
+    ),
+    ?assertEqual(Running, whereis_pool(?POOL)),
+    {ok, _Conn, Token} = kura_pool_minato:checkout(?POOL, #{timeout => 1000}),
+    ok = kura_pool_minato:checkin(?POOL, Token).
+
+whereis_pool(Name) ->
+    [Pid] = [Pid || {Id, Pid, _, _} <- supervisor:which_children(minato_sup), Id =:= Name],
+    Pid.
 
 %%----------------------------------------------------------------------
 %% Helpers
