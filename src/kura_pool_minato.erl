@@ -114,13 +114,17 @@ start a pool whose connections cannot log in.
 `transport` is passed through. minato chooses one by default and documents the
 other as the way back from that choice, which is only true from here if the
 option survives the translation.
+
+A name that is already running returns `{error, {already_started, Pid}}` with
+the running pool's pid, and that pool keeps the options it was started with.
+kura tells a fresh start from a running pool by this answer, so a second repo
+naming the same pool is not told the pool was started for it.
 """.
 -spec start_pool(kura_pool:name(), kura_pool:opts()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Opts) when is_map_key(user, Opts); is_map_key(username, Opts) ->
     {ok, _Started} = application:ensure_all_started(minato),
     case minato:start_pool(Name, translate(Opts)) of
         {ok, Pid} when is_pid(Pid) -> {ok, Pid};
-        {error, {already_started, Pid}} when is_pid(Pid) -> {ok, Pid};
         {error, Reason} -> {error, Reason}
     end;
 start_pool(_Name, _Opts) ->
