@@ -110,7 +110,20 @@ nested_test_() ->
             {"a refused ROLLBACK TO rolls back the whole transaction",
                 fun refused_rollback_to_rolls_back_everything/0},
             {"a ROLLBACK TO that raises keeps the original exception",
-                fun raised_rollback_to_keeps_original/0}
+                fun raised_rollback_to_keeps_original/0},
+            {"query_on/4: a COMMIT inside a transaction it started raises",
+                fun query_on_commit_inside_raises/0},
+            {"query_on/4: an END inside a transaction it started raises", fun() ->
+                query_on_ended_by(~"END", [1])
+            end},
+            {"query_on/4: a ROLLBACK inside a transaction it started raises", fun() ->
+                query_on_ended_by(~"ROLLBACK", [])
+            end},
+            {"query_on/4: a ROLLBACK TO SAVEPOINT inside leaves the transaction open",
+                fun query_on_rollback_to_keeps_transaction/0},
+            {"query_on/4: starts runs the caller's BEGIN", fun query_on_starts_runs_begin/0},
+            {"query_on/4: without the option a COMMIT runs as before",
+                fun query_on_without_option_commits/0}
         ]}
     end}.
 
@@ -640,6 +653,68 @@ query(SQL, Params) ->
 sql(SQL) ->
     #{} = query(SQL, []),
     ok.
+
+query_on_commit_inside_raises() ->
+    query_on_ended_by(~"COMMIT", [1]).
+
+query_on_ended_by(Statement, Kept) ->
+    on_checked_out(fun(Conn) ->
+        #{} = on(Conn, ~"BEGIN", [], starts),
+        #{num_rows := 1} = on(Conn, insert_sql(), [1], inside),
+        ?assertError(
+            {kura_driver_minato, transaction_ended_by_statement},
+            on(Conn, Statement, [], inside)
+        ),
+        ?assertError(
+            {kura_driver_minato, transaction_ended_by_statement},
+            on(Conn, insert_sql(), [2], inside)
+        )
+    end),
+    ?assertEqual(Kept, ids(nested_table())).
+
+query_on_rollback_to_keeps_transaction() ->
+    on_checked_out(fun(Conn) ->
+        #{} = on(Conn, ~"BEGIN", [], starts),
+        #{} = on(Conn, ~"SAVEPOINT caller_savepoint", [], inside),
+        #{num_rows := 1} = on(Conn, insert_sql(), [1], inside),
+        #{} = on(Conn, ~"ROLLBACK TO SAVEPOINT caller_savepoint", [], inside),
+        #{num_rows := 1} = on(Conn, insert_sql(), [2], inside),
+        #{} = on(Conn, ~"COMMIT", [], none)
+    end),
+    ?assertEqual([2], ids(nested_table())).
+
+query_on_starts_runs_begin() ->
+    on_checked_out(fun(Conn) ->
+        #{} = on(Conn, ~"BEGIN ISOLATION LEVEL SERIALIZABLE", [], starts),
+        ?assertMatch(
+            #{rows := [#{transaction_isolation := ~"serializable"}]},
+            on(Conn, ~"SHOW transaction_isolation", [], inside)
+        ),
+        #{} = on(Conn, ~"ROLLBACK", [], none)
+    end).
+
+query_on_without_option_commits() ->
+    on_checked_out(fun(Conn) ->
+        #{} = kura_driver_minato:query_on(Conn, ~"BEGIN", [], #{}),
+        #{num_rows := 1} = kura_driver_minato:query_on(Conn, insert_sql(), [1], #{}),
+        ?assertMatch(#{command := commit}, kura_driver_minato:query_on(Conn, ~"COMMIT", [], #{})),
+        ?assertMatch(#{num_rows := 1}, kura_driver_minato:query_on(Conn, insert_sql(), [2], #{}))
+    end),
+    ?assertEqual([1, 2], ids(nested_table())).
+
+on_checked_out(Fun) ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        Fun(Conn)
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+on(Conn, SQL, Params, Transaction) ->
+    kura_driver_minato:query_on(Conn, SQL, Params, #{transaction => Transaction}).
+
+insert_sql() ->
+    [~"INSERT INTO ", nested_table(), ~" VALUES ($1)"].
 
 insert(Id) ->
     #{num_rows := 1} = query([~"INSERT INTO ", nested_table(), ~" VALUES ($1)"], [Id]),

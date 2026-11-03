@@ -45,7 +45,14 @@ transaction and resets the session before it lends the connection again.
     capabilities/0
 ]).
 
--export([open_transaction/1, run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
+-export([
+    open_transaction/1,
+    open_transaction/2,
+    run/4,
+    run_in_transaction/4,
+    transaction_conn/1,
+    in_transaction/2
+]).
 
 -ifdef(TEST).
 -export([marked/2]).
@@ -71,7 +78,7 @@ it from.
 
 -define(CALL_TIMEOUT, 30000).
 
--define(OPEN_TRANSACTION, ~"BEGIN; SET LOCAL kura.txn = '1'").
+-define(MARK_TRANSACTION, ~"; SET LOCAL kura.txn = '1'").
 -define(MARKER, ~"SELECT current_setting('kura.txn', true)").
 
 -doc "What this backend supports. Read by `kura_capabilities`.".
@@ -222,7 +229,16 @@ after which a savepoint rollback reads as a replaced transaction.
 """.
 -spec open_transaction(pid()) -> dynamic().
 open_transaction(Holder) ->
-    reraised(call(Holder, {run, opening, ?OPEN_TRANSACTION, [], #{}}, infinity)).
+    open_transaction(Holder, ~"BEGIN").
+
+-doc """
+Begin a transaction on a held connection with `Begin`, a statement such as
+`BEGIN` or `BEGIN ISOLATION LEVEL SERIALIZABLE`, and mark it as
+`open_transaction/1` does.
+""".
+-spec open_transaction(pid(), iodata()) -> dynamic().
+open_transaction(Holder, Begin) ->
+    reraised(call(Holder, {run, opening, [Begin, ?MARK_TRANSACTION], [], #{}}, infinity)).
 
 -doc """
 Run a statement on a held connection that is inside a transaction, and say what
