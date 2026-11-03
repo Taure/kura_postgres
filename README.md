@@ -32,6 +32,18 @@ Point kura at the backend in `sys.config`:
 On application start, Kura resolves the aggregator and auto-populates `dialect`,
 `pool_module`, and `driver_module`. Per-key overrides still win.
 
+## Transactions
+
+`kura_driver_minato:transaction/4` runs a nested call under a `SAVEPOINT`. A
+`COMMIT`, `END`, `ROLLBACK`, or any of them `AND CHAIN`, run as a query inside a
+transaction that `transaction/4` opened, outermost or nested, raises
+`error({kura_driver_minato, transaction_ended_by_statement})`. The driver reads
+the transaction status and command tag the server reports after every
+statement, so whatever the statement committed stays committed and nothing after
+it runs outside the transaction. A sandboxed test (`kura_sandbox`) is not
+covered: it runs its statements through `query_on/4`. See the
+`kura_driver_minato` module docs for every error `transaction/4` can raise.
+
 ## Capabilities
 
 `kura_pool_minato:capabilities/0`:

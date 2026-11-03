@@ -23,7 +23,10 @@ with_pool_test_() ->
             {"with_conn runs the fun and checks back in", fun with_conn_roundtrip/0},
             {"sequential checkouts reuse a connection from the pool", fun sequential_checkouts/0},
             {"give_away transfers ownership to another process", fun give_away_transfers/0},
-            {"start_pool is idempotent on a running pool", fun start_pool_idempotent/0},
+            {"start_pool reports a running pool as already started",
+                fun start_pool_reports_already_started/0},
+            {"a second start with other options leaves the running pool as it is",
+                fun second_start_keeps_the_running_pool/0},
             {"an owner's death discards the connection and its session state",
                 fun owner_death_discards_connection/0},
             {"minato's server-side cancellation reaches the caller of run/4",
@@ -33,7 +36,27 @@ with_pool_test_() ->
             {"a statement that raises re-raises in the caller and ends the holder",
                 fun raising_statement_ends_the_holder/0},
             {"a held connection builds and drops an index concurrently",
-                fun concurrent_index_on_a_held_connection/0}
+                fun concurrent_index_on_a_held_connection/0},
+            {"run_in_transaction/4 reports the transaction status after a statement",
+                fun run_in_transaction_reports_status/0},
+            {"run_in_transaction/4 runs nothing outside a transaction",
+                fun run_in_transaction_refuses_outside/0},
+            {"run_in_transaction/4 runs nothing after a COMMIT AND CHAIN",
+                fun run_in_transaction_refuses_after_chain/0},
+            {"run_in_transaction/4 stays refused after a new BEGIN",
+                fun run_in_transaction_stays_refused/0},
+            {"run_in_transaction/4 tells a chained rollback from a savepoint rollback",
+                fun run_in_transaction_tells_rollbacks_apart/0},
+            {"open_transaction/1 answers the error of a BEGIN the server refuses",
+                fun refused_open_transaction/0},
+            {"open_transaction/1 that loses the connection ends the holder",
+                fun lost_open_transaction_ends_the_holder/0},
+            {"run_in_transaction/4 that loses the connection answers unknown and ends the holder",
+                fun lost_run_in_transaction_ends_the_holder/0},
+            {"a marker read the server refuses counts as an ended transaction",
+                fun refused_marker_read_ends/0},
+            {"a marker read that loses the connection answers the connection error",
+                fun lost_marker_read_is_a_connection_error/0}
         ]
     end}.
 
@@ -48,6 +71,22 @@ transport_survives_translation_test() ->
     Config = ?CONFIG,
     Opts = Config#{transport => inet, socket_options => [{priority, 3}]},
     {ok, _Pid} = kura_pool_minato:start_pool(Name, Opts),
+    ?assertEqual(ok, wait_for_ready(Name, 5000)),
+    _ = kura_pool_minato:stop_pool(Name),
+    ok.
+
+a_pool_without_a_user_is_refused_test() ->
+    Config = maps:remove(user, ?CONFIG),
+    ?assertEqual(
+        {error, {missing_option, user}},
+        kura_pool_minato:start_pool(kura_pool_minato_no_user_test, Config)
+    ),
+    ?assertEqual(undefined, whereis(kura_pool_minato_no_user_test)).
+
+a_pool_given_username_is_started_test() ->
+    Name = kura_pool_minato_username_test,
+    Config = maps:remove(user, ?CONFIG),
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, Config#{username => ~"postgres"}),
     ?assertEqual(ok, wait_for_ready(Name, 5000)),
     _ = kura_pool_minato:stop_pool(Name),
     ok.
@@ -128,6 +167,155 @@ concurrent_index_on_a_held_connection() ->
     kura_pool:with_conn(kura_pool_minato, ?POOL, fun(Conn) ->
         [?assertNotMatch({error, _}, kura_pool_minato:run(Conn, SQL, [], #{})) || SQL <- Statements]
     end).
+
+run_in_transaction_reports_status() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        ?assertMatch(
+            {#{rows := [_]}, transaction},
+            kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{})
+        ),
+        ?assertMatch(
+            {{error, {pgsql_error, _}}, failed},
+            kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1 / 0", [], #{})
+        ),
+        ?assertMatch(
+            {#{command := rollback}, ended},
+            kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK", [], #{})
+        )
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_refuses_outside() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        ?assertEqual(
+            ended,
+            kura_pool_minato:run_in_transaction(
+                Conn, ~"CREATE TEMP TABLE kura_pool_minato_refused (id integer)", [], #{}
+            )
+        ),
+        #{rows := [Row]} = kura_pool_minato:run(
+            Conn, ~"SELECT to_regclass('pg_temp.kura_pool_minato_refused') IS NULL", [], #{}
+        ),
+        ?assertEqual([true], tuple_to_list(Row))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_refuses_after_chain() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        ?assertMatch(
+            {#{command := commit}, ended},
+            kura_pool_minato:run_in_transaction(Conn, ~"COMMIT AND CHAIN", [], #{})
+        ),
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{})),
+        #{rows := [Row]} = kura_pool_minato:run(
+            Conn, ~"SELECT now() = statement_timestamp()", [], #{}
+        ),
+        ?assertEqual([false], tuple_to_list(Row))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_stays_refused() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{})),
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{}))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+run_in_transaction_tells_rollbacks_apart() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        ?assertMatch(#{command := 'begin'}, kura_pool_minato:open_transaction(Conn)),
+        ?assertMatch(
+            {#{command := savepoint}, transaction},
+            kura_pool_minato:run_in_transaction(Conn, ~"SAVEPOINT caller", [], #{})
+        ),
+        ?assertMatch(
+            {#{command := rollback}, transaction},
+            kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK TO SAVEPOINT caller", [], #{})
+        ),
+        ?assertMatch(
+            {#{command := rollback}, ended},
+            kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK AND CHAIN", [], #{})
+        ),
+        ?assertEqual(ended, kura_pool_minato:run_in_transaction(Conn, ~"SELECT 1", [], #{}))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+refused_open_transaction() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    try
+        #{command := 'begin'} = kura_pool_minato:run(Conn, ~"BEGIN", [], #{}),
+        {error, {pgsql_error, _}} = kura_pool_minato:run(Conn, ~"SELECT 1 / 0", [], #{}),
+        ?assertMatch(
+            {error, {pgsql_error, #{code := ~"25P02"}}}, kura_pool_minato:open_transaction(Conn)
+        ),
+        ?assertMatch(#{command := rollback}, kura_pool_minato:run(Conn, ~"ROLLBACK", [], #{}))
+    after
+        ok = kura_pool_minato:checkin(?POOL, Token)
+    end.
+
+lost_open_transaction_ends_the_holder() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    Monitor = erlang:monitor(process, Conn),
+    #{rows := [Row]} = kura_pool_minato:run(Conn, ~"SELECT pg_backend_pid()", [], #{}),
+    [Backend] = tuple_to_list(Row),
+    #{rows := [_]} = kura_pool:with_conn(kura_pool_minato, ?POOL, fun(Other) ->
+        kura_pool_minato:run(Other, ~"SELECT pg_terminate_backend($1, 1000)", [Backend], #{})
+    end),
+    ?assertMatch({error, {socket, _}}, kura_pool_minato:open_transaction(Conn)),
+    receive
+        {'DOWN', Monitor, process, Conn, _} -> ok
+    after 2000 -> error(holder_still_running)
+    end,
+    ?assertEqual(ok, kura_pool_minato:checkin(?POOL, Token)),
+    ?assertEqual(ok, wait_for_ready(?POOL, 2000)).
+
+lost_run_in_transaction_ends_the_holder() ->
+    {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),
+    Monitor = erlang:monitor(process, Conn),
+    #{command := 'begin'} = kura_pool_minato:open_transaction(Conn),
+    {#{command := savepoint}, transaction} =
+        kura_pool_minato:run_in_transaction(Conn, ~"SAVEPOINT caller", [], #{}),
+    #{rows := [Row]} = kura_pool_minato:run(Conn, ~"SELECT pg_backend_pid()", [], #{}),
+    [Backend] = tuple_to_list(Row),
+    #{rows := [_]} = kura_pool:with_conn(kura_pool_minato, ?POOL, fun(Other) ->
+        kura_pool_minato:run(Other, ~"SELECT pg_terminate_backend($1, 1000)", [Backend], #{})
+    end),
+    ?assertMatch(
+        {{error, _}, unknown},
+        kura_pool_minato:run_in_transaction(Conn, ~"ROLLBACK TO SAVEPOINT caller", [], #{})
+    ),
+    receive
+        {'DOWN', Monitor, process, Conn, _} -> ok
+    after 2000 -> error(holder_still_running)
+    end,
+    ?assertEqual(ok, kura_pool_minato:checkin(?POOL, Token)),
+    ?assertEqual(ok, wait_for_ready(?POOL, 2000)).
+
+refused_marker_read_ends() ->
+    {ok, Conn} = minato_pool:checkout(?POOL, 5000),
+    {ok, _Began, Begun} = minato_query:query(Conn, ~"BEGIN", []),
+    {error, {pgsql_error, _}, Failed} = minato_query:query(Begun, ~"SELECT 1 / 0", []),
+    {ended, Next} = kura_pool_minato:marked(Failed, #{}),
+    ok = minato_pool:discard(?POOL, Next).
+
+lost_marker_read_is_a_connection_error() ->
+    {ok, Conn} = minato_pool:checkout(?POOL, 5000),
+    ok = minato_conn:close(Conn),
+    ?assertMatch({lost, {error, _}}, kura_pool_minato:marked(Conn, #{})),
+    ok = minato_pool:discard(?POOL, Conn).
 
 sequential_checkouts() ->
     %% Two back-to-back checkouts must both succeed (proves checkin returned the
@@ -275,9 +463,28 @@ checkout_timeout_kills_the_holder() ->
 slow_checkout_stop(_Event, _Measurements, #{outcome := ok}, Sleep) -> timer:sleep(Sleep);
 slow_checkout_stop(_Event, _Measurements, _Metadata, _Sleep) -> ok.
 
-start_pool_idempotent() ->
-    %% Already started in setup. Re-calling must return ok with the existing pid.
-    ?assertMatch({ok, _Pid}, kura_pool_minato:start_pool(?POOL, ?CONFIG)).
+start_pool_reports_already_started() ->
+    Running = whereis_pool(?POOL),
+    ?assertEqual(
+        {error, {already_started, Running}}, kura_pool_minato:start_pool(?POOL, ?CONFIG)
+    ).
+
+%% Two repos naming one pool: the second start must not look like a pool
+%% started with its own settings.
+second_start_keeps_the_running_pool() ->
+    Running = whereis_pool(?POOL),
+    Other = ?CONFIG,
+    ?assertEqual(
+        {error, {already_started, Running}},
+        kura_pool_minato:start_pool(?POOL, Other#{user => "someone_else", password => "other"})
+    ),
+    ?assertEqual(Running, whereis_pool(?POOL)),
+    {ok, _Conn, Token} = kura_pool_minato:checkout(?POOL, #{timeout => 1000}),
+    ok = kura_pool_minato:checkin(?POOL, Token).
+
+whereis_pool(Name) ->
+    [Pid] = [Pid || {Id, Pid, _, _} <- supervisor:which_children(minato_sup), Id =:= Name],
+    Pid.
 
 %%----------------------------------------------------------------------
 %% Helpers
