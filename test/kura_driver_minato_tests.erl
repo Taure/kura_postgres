@@ -121,7 +121,8 @@ nested_test_() ->
             end},
             {"query_on/4: a ROLLBACK TO SAVEPOINT inside leaves the transaction open",
                 fun query_on_rollback_to_keeps_transaction/0},
-            {"query_on/4: starts runs the caller's BEGIN", fun query_on_starts_runs_begin/0},
+            {"query_on/4: starts opens the driver's own marked transaction",
+                fun query_on_starts_opens_its_own/0},
             {"query_on/4: without the option a COMMIT runs as before",
                 fun query_on_without_option_commits/0}
         ]}
@@ -683,15 +684,16 @@ query_on_rollback_to_keeps_transaction() ->
     end),
     ?assertEqual([2], ids(nested_table())).
 
-query_on_starts_runs_begin() ->
+%% A comment that would swallow an appended marker never reaches the server.
+query_on_starts_opens_its_own() ->
     on_checked_out(fun(Conn) ->
-        #{} = on(Conn, ~"BEGIN ISOLATION LEVEL SERIALIZABLE", [], starts),
-        ?assertMatch(
-            #{rows := [#{transaction_isolation := ~"serializable"}]},
-            on(Conn, ~"SHOW transaction_isolation", [], inside)
-        ),
+        #{} = on(Conn, ~"BEGIN -- caller's comment", [], starts),
+        #{} = on(Conn, ~"SAVEPOINT caller_savepoint", [], inside),
+        #{} = on(Conn, ~"ROLLBACK TO SAVEPOINT caller_savepoint", [], inside),
+        #{num_rows := 1} = on(Conn, insert_sql(), [1], inside),
         #{} = on(Conn, ~"ROLLBACK", [], none)
-    end).
+    end),
+    ?assertEqual([], ids(nested_table())).
 
 query_on_without_option_commits() ->
     on_checked_out(fun(Conn) ->
