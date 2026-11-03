@@ -62,8 +62,11 @@ setting too, so a later `ROLLBACK TO SAVEPOINT`, including the one a nested
 `transaction/4` cleans up with, raises `transaction_ended_by_statement` while the
 transaction is still open. Avoid `RESET ALL` inside `transaction/4`.
 
-This covers transactions `transaction/4` opens. A sandboxed test runs its
-statements through `query_on/4`, which does not check.
+This covers transactions `transaction/4` opens, and a sandboxed test's: kura's
+sandbox begins its transaction with `query_on/4` and `transaction => starts`,
+which this driver opens and marks the way `transaction/4` does, and runs every
+statement in it with `transaction => inside`, which goes through the same
+check. The `RESET ALL` caveat above applies there too.
 
 ## Timeouts
 
@@ -100,10 +103,25 @@ query(_PoolMod, Pool, SQL, Params, Opts) ->
             still_open(kura_pool_minato:run_in_transaction(Holder, SQL, Params, decoding(Opts)))
     end.
 
--doc "Run a statement on a connection the caller checked out.".
+-doc """
+Run a statement on a connection the caller checked out.
+
+With `transaction => starts`, `SQL` is a plain `BEGIN`: the driver opens the
+transaction with its own, marked as `transaction/4` marks its own, and does not
+send `SQL`. With `transaction => inside`, a statement that
+ends that transaction, or one run after it has ended, raises
+`error({kura_driver_minato, transaction_ended_by_statement})`.
+""".
 -spec query_on(kura_pool:conn(), iodata(), [term()], map()) -> dynamic().
 query_on(Holder, SQL, Params, Opts) when is_pid(Holder) ->
-    kura_pool_minato:run(Holder, SQL, Params, decoding(Opts)).
+    case maps:get(transaction, Opts, none) of
+        starts ->
+            kura_pool_minato:open_transaction(Holder);
+        inside ->
+            still_open(kura_pool_minato:run_in_transaction(Holder, SQL, Params, decoding(Opts)));
+        _None ->
+            kura_pool_minato:run(Holder, SQL, Params, decoding(Opts))
+    end.
 
 -doc """
 Run `Fun` inside a transaction.
