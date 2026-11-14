@@ -16,7 +16,7 @@
 
 %% One test for each capability kura_pool_minato declares, run on the server.
 %% A capability declared without a clause of runs/1 fails here. The ones kura
-%% checks under capability model 2 run through kura's own API.
+%% checks a query or a stream for run through kura's own API.
 declared_capabilities_run_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
@@ -32,11 +32,21 @@ the_backend_declares_what_the_pool_declares_test() ->
     ?assertEqual(kura_pool_minato:capabilities(), kura_backend_postgres:capabilities()),
     ?assertEqual(kura_pool_minato:capability_model(), kura_backend_postgres:capability_model()).
 
-%% Model 2 is the one whose checks name row_locks, distinct_on and cursors.
-the_list_is_written_against_model_2_test() ->
-    ?assertEqual(2, kura_pool_minato:capability_model()),
+%% The model number lives in kura_pool_minato alone. Whatever it is, every
+%% capability kura checks a query or a stream for is declared.
+the_checked_capabilities_are_declared_test() ->
+    ?assert(is_integer(kura_pool_minato:capability_model())),
     ?assertEqual(
-        ok, kura_capabilities:require(kura_pool_minato, [row_locks, distinct_on, cursors])
+        ok,
+        kura_capabilities:require(kura_pool_minato, [
+            full_text_search,
+            window_functions,
+            vector,
+            select_for_update_skip_locked,
+            row_locks,
+            distinct_on,
+            cursors
+        ])
     ).
 
 a_capability_is_declared_once_test() ->
