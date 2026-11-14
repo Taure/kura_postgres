@@ -1,20 +1,6 @@
 -module(kura_dialect_pg_tests).
 -include_lib("eunit/include/eunit.hrl").
 
--eqwalizer({nowarn_function, join_test/0}).
--eqwalizer({nowarn_function, left_join_test/0}).
--eqwalizer({nowarn_function, join_chained_test/0}).
--eqwalizer({nowarn_function, join_with_alias_test/0}).
--eqwalizer({nowarn_function, join_schema_module_test/0}).
--eqwalizer({nowarn_function, order_by_test/0}).
--eqwalizer({nowarn_function, group_by_test/0}).
--eqwalizer({nowarn_function, having_test/0}).
--eqwalizer({nowarn_function, limit_test/0}).
--eqwalizer({nowarn_function, limit_offset_test/0}).
--eqwalizer({nowarn_function, distinct_test/0}).
--eqwalizer({nowarn_function, distinct_on_test/0}).
--eqwalizer({nowarn_function, lock_test/0}).
-
 %%----------------------------------------------------------------------
 %% SELECT compilation
 %%----------------------------------------------------------------------
@@ -138,35 +124,50 @@ where_fragment_test() ->
 join_test() ->
     Q = kura_query:join(kura_query:from(user), inner, post, {id, user_id}),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"INNER JOIN \"post\"">>) =/= nomatch),
-    ?assert(binary:match(SQL, <<"ON \"user\".\"id\" = \"post\".\"user_id\"">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"INNER JOIN \"post\"">>) =/= nomatch),
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"ON \"user\".\"id\" = \"post\".\"user_id\"">>) =/=
+            nomatch
+    ).
 
 left_join_test() ->
     Q = kura_query:join(kura_query:from(user), left, post, {id, user_id}),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"LEFT JOIN \"post\"">>) =/= nomatch),
-    ?assert(binary:match(SQL, <<"ON \"user\".\"id\" = \"post\".\"user_id\"">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"LEFT JOIN \"post\"">>) =/= nomatch),
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"ON \"user\".\"id\" = \"post\".\"user_id\"">>) =/=
+            nomatch
+    ).
 
 join_chained_test() ->
     Q0 = kura_query:from(user),
     Q1 = kura_query:join(Q0, inner, post, {id, user_id}),
     Q2 = kura_query:join(Q1, inner, comment, {id, post_id}),
     {SQL, _} = kura_dialect_pg:to_sql(Q2),
-    ?assert(binary:match(SQL, <<"ON \"user\".\"id\" = \"post\".\"user_id\"">>) =/= nomatch),
-    ?assert(binary:match(SQL, <<"ON \"post\".\"id\" = \"comment\".\"post_id\"">>) =/= nomatch).
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"ON \"user\".\"id\" = \"post\".\"user_id\"">>) =/=
+            nomatch
+    ),
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"ON \"post\".\"id\" = \"comment\".\"post_id\"">>) =/=
+            nomatch
+    ).
 
 join_with_alias_test() ->
     Q = kura_query:join(kura_query:from(user), inner, post, {id, user_id}, p),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"INNER JOIN \"post\" AS \"p\"">>) =/= nomatch),
-    ?assert(binary:match(SQL, <<"ON \"user\".\"id\" = \"p\".\"user_id\"">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"INNER JOIN \"post\" AS \"p\"">>) =/= nomatch),
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"ON \"user\".\"id\" = \"p\".\"user_id\"">>) =/=
+            nomatch
+    ).
 
 join_schema_module_test() ->
     Q = kura_query:join(
         kura_query:from(kura_test_schema), inner, kura_test_post_schema, {id, author_id}
     ),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"INNER JOIN \"posts\"">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"INNER JOIN \"posts\"">>) =/= nomatch).
 
 %%----------------------------------------------------------------------
 %% ORDER BY
@@ -175,7 +176,9 @@ join_schema_module_test() ->
 order_by_test() ->
     Q = kura_query:order_by(kura_query:from(user), [{name, asc}, {age, desc}]),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"ORDER BY \"name\" ASC, \"age\" DESC">>) =/= nomatch).
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"ORDER BY \"name\" ASC, \"age\" DESC">>) =/= nomatch
+    ).
 
 %%----------------------------------------------------------------------
 %% GROUP BY + HAVING
@@ -185,14 +188,14 @@ group_by_test() ->
     Q = kura_query:group_by(kura_query:from(user), [role]),
     Q2 = kura_query:count(Q),
     {SQL, _} = kura_dialect_pg:to_sql(Q2),
-    ?assert(binary:match(SQL, <<"GROUP BY \"role\"">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"GROUP BY \"role\"">>) =/= nomatch).
 
 having_test() ->
     Q = kura_query:group_by(kura_query:from(user), [role]),
     Q2 = kura_query:having(Q, {age, '>', 5}),
     Q3 = kura_query:count(Q2),
     {SQL, Params} = kura_dialect_pg:to_sql(Q3),
-    ?assert(binary:match(SQL, <<"HAVING \"age\" > $">>) =/= nomatch),
+    ?assert(binary:match(iolist_to_binary(SQL), <<"HAVING \"age\" > $">>) =/= nomatch),
     ?assertEqual([5], Params).
 
 %%----------------------------------------------------------------------
@@ -202,7 +205,7 @@ having_test() ->
 limit_test() ->
     Q = kura_query:limit(kura_query:from(user), 10),
     {SQL, Params} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"LIMIT $1">>) =/= nomatch),
+    ?assert(binary:match(iolist_to_binary(SQL), <<"LIMIT $1">>) =/= nomatch),
     ?assertEqual([10], Params).
 
 limit_offset_test() ->
@@ -210,8 +213,8 @@ limit_offset_test() ->
     Q1 = kura_query:limit(Q0, 10),
     Q2 = kura_query:offset(Q1, 20),
     {SQL, Params} = kura_dialect_pg:to_sql(Q2),
-    ?assert(binary:match(SQL, <<"LIMIT $1">>) =/= nomatch),
-    ?assert(binary:match(SQL, <<"OFFSET $2">>) =/= nomatch),
+    ?assert(binary:match(iolist_to_binary(SQL), <<"LIMIT $1">>) =/= nomatch),
+    ?assert(binary:match(iolist_to_binary(SQL), <<"OFFSET $2">>) =/= nomatch),
     ?assertEqual([10, 20], Params).
 
 %%----------------------------------------------------------------------
@@ -221,12 +224,14 @@ limit_offset_test() ->
 distinct_test() ->
     Q = kura_query:distinct(kura_query:from(user)),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"SELECT DISTINCT *">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"SELECT DISTINCT *">>) =/= nomatch).
 
 distinct_on_test() ->
     Q = kura_query:distinct(kura_query:from(user), [email]),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"SELECT DISTINCT ON (\"email\") *">>) =/= nomatch).
+    ?assert(
+        binary:match(iolist_to_binary(SQL), <<"SELECT DISTINCT ON (\"email\") *">>) =/= nomatch
+    ).
 
 %%----------------------------------------------------------------------
 %% LOCK
@@ -235,7 +240,7 @@ distinct_on_test() ->
 lock_test() ->
     Q = kura_query:lock(kura_query:from(user), <<"FOR UPDATE">>),
     {SQL, _} = kura_dialect_pg:to_sql(Q),
-    ?assert(binary:match(SQL, <<"FOR UPDATE">>) =/= nomatch).
+    ?assert(binary:match(iolist_to_binary(SQL), <<"FOR UPDATE">>) =/= nomatch).
 
 %%----------------------------------------------------------------------
 %% PREFIX (schema)
