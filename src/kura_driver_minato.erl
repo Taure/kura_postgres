@@ -29,8 +29,14 @@ back the exact decimal text, because that is what the type is for. kura has
 always given callers a float for it, through `pg_types`, and a driver swap is
 the wrong moment to change what `avg/1` returns for everybody.
 
-A repo that wants the exact form says `numeric_format => binary` in its driver
-options, and should, for anything that is money.
+So a `decimal` field read through a schema is a float, with the 15 to 17
+significant digits a float holds. kura passes this driver none of the caller's
+options on that path, so a repo cannot ask for anything else there.
+
+A statement run with `numeric_format => binary` in the options of `query/5` or
+`query_on/4`, which is where `kura_db:query_on/5` hands its options, gets the
+exact text: `~"12345678901234567.89"`. `kura_types:load/2` keeps that text as it
+is from kura 2.31, and turned it into a float before.
 
 ## Transaction control in user SQL
 

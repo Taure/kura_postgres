@@ -47,6 +47,13 @@ it runs outside the transaction. The transaction of a sandboxed test
 (`kura_sandbox`) is checked the same way. See the `kura_driver_minato` module
 docs for every error `transaction/4` can raise.
 
+## Decimals
+
+A `decimal` field read through a schema is a float, so it holds 15 to 17
+significant digits. The exact text of a `numeric` is returned to a statement
+run with `numeric_format => binary` in its driver options, as
+`kura_db:query_on/5` takes them. See `kura_driver_minato`.
+
 ## Capabilities
 
 `kura_pool_minato:capabilities/0`:
