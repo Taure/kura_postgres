@@ -53,10 +53,15 @@ docs for every error `transaction/4` can raise.
 
 ```
 [returning, jsonb, arrays, advisory_locks, listen_notify,
- select_for_update_skip_locked, partial_indexes, window_functions,
- full_text_search, vector, transactions, savepoints,
- prepared_statements, concurrent_indexes]
+ select_for_update_skip_locked, row_locks, distinct_on, cursors,
+ partial_indexes, window_functions, full_text_search, vector,
+ transactions, savepoints, prepared_statements, concurrent_indexes]
 ```
+
+That is every standard capability of `kura_capabilities`.
+`kura_pool_minato:capability_model/0` is `2`: the list is written against the
+checks that name `row_locks`, `distinct_on` and `cursors`, which kura releases
+after 2.30 make. An older kura does not call it.
 
 Each is run against PostgreSQL 16 in `kura_postgres_capabilities_tests`. The
 list is the same for every database: `vector` is declared whether or not the

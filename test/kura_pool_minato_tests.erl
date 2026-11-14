@@ -114,30 +114,30 @@ capabilities_behaviour_declared() ->
     Behaviours = lists:append([V || {behaviour, V} <- Attrs] ++ [V || {behavior, V} <- Attrs]),
     ?assert(lists:member(kura_capabilities, Behaviours)).
 
+%% Every standard capability in kura_capabilities' documentation, and
+%% nothing else.
 capabilities_set() ->
-    %% require/2 with the full standard PG set should pass.
-    ?assertEqual(
-        ok,
-        kura_capabilities:require(
-            kura_pool_minato,
-            [
-                returning,
-                jsonb,
-                arrays,
-                advisory_locks,
-                listen_notify,
-                select_for_update_skip_locked,
-                partial_indexes,
-                window_functions,
-                full_text_search,
-                vector,
-                transactions,
-                savepoints,
-                prepared_statements,
-                concurrent_indexes
-            ]
-        )
-    ).
+    Standard = [
+        returning,
+        jsonb,
+        arrays,
+        advisory_locks,
+        listen_notify,
+        select_for_update_skip_locked,
+        row_locks,
+        distinct_on,
+        cursors,
+        partial_indexes,
+        concurrent_indexes,
+        window_functions,
+        full_text_search,
+        vector,
+        transactions,
+        savepoints,
+        prepared_statements
+    ],
+    ?assertEqual(ok, kura_capabilities:require(kura_pool_minato, Standard)),
+    ?assertEqual(lists:sort(Standard), lists:sort(kura_pool_minato:capabilities())).
 
 checkout_returns_conn() ->
     {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),

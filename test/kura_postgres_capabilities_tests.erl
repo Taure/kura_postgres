@@ -2,6 +2,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -define(POOL, kura_postgres_capabilities_test).
+-define(REPO, kura_postgres_test_repo).
 -define(LISTENER, kura_postgres_capabilities_listener).
 -define(CONFIG, #{
     host => "localhost",
@@ -14,7 +15,8 @@
 -define(ADVISORY_KEY, 5272178).
 
 %% One test for each capability kura_pool_minato declares, run on the server.
-%% A capability declared without a clause of runs/1 fails here.
+%% A capability declared without a clause of runs/1 fails here. The ones kura
+%% checks under capability model 2 run through kura's own API.
 declared_capabilities_run_test_() ->
     {setup, fun setup/0, fun teardown/1, fun(_) ->
         [
@@ -27,7 +29,15 @@ declared_capabilities_run_test_() ->
     end}.
 
 the_backend_declares_what_the_pool_declares_test() ->
-    ?assertEqual(kura_pool_minato:capabilities(), kura_backend_postgres:capabilities()).
+    ?assertEqual(kura_pool_minato:capabilities(), kura_backend_postgres:capabilities()),
+    ?assertEqual(kura_pool_minato:capability_model(), kura_backend_postgres:capability_model()).
+
+%% Model 2 is the one whose checks name row_locks, distinct_on and cursors.
+the_list_is_written_against_model_2_test() ->
+    ?assertEqual(2, kura_pool_minato:capability_model()),
+    ?assertEqual(
+        ok, kura_capabilities:require(kura_pool_minato, [row_locks, distinct_on, cursors])
+    ).
 
 a_capability_is_declared_once_test() ->
     Declared = kura_pool_minato:capabilities(),
@@ -131,6 +141,44 @@ runs(select_for_update_skip_locked) ->
     end),
     ?assertMatch(#{rows := [#{id := 2}]}, Unlocked),
     ?assertMatch(#{rows := [#{id := 1}, #{id := 2}]}, query(Skipping, SkippingParams));
+runs(row_locks) ->
+    ok = sql([~"INSERT INTO ", table(), ~" (id) VALUES (1), (2)"]),
+    Refused = kura_repo_worker:transaction(?REPO, fun() ->
+        ?assertMatch({ok, [#{id := 1}]}, kura_repo_worker:all(?REPO, locked(1, ~"FOR UPDATE"))),
+        in_another_process(fun() ->
+            {
+                kura_repo_worker:all(?REPO, locked(1, ~"FOR SHARE NOWAIT")),
+                kura_repo_worker:all(?REPO, locked(2, ~"FOR UPDATE NOWAIT"))
+            }
+        end)
+    end),
+    ?assertMatch({{error, {pgsql_error, #{code := ~"55P03"}}}, {ok, [#{id := 2}]}}, Refused),
+    ?assertMatch({ok, [#{id := 1}]}, kura_repo_worker:all(?REPO, locked(1, ~"FOR SHARE NOWAIT")));
+runs(distinct_on) ->
+    ok = sql([
+        ~"INSERT INTO ", table(), ~" (id, name) VALUES (1, 'a'), (2, 'a'), (3, 'b')"
+    ]),
+    Latest = kura_query:order_by(
+        kura_query:distinct(kura_query:from(rows()), [name]), [{name, asc}, {id, desc}]
+    ),
+    ?assertMatch(
+        {ok, [#{id := 2, name := ~"a"}, #{id := 3, name := ~"b"}]},
+        kura_repo_worker:all(?REPO, Latest)
+    );
+runs(cursors) ->
+    ok = sql([~"INSERT INTO ", table(), ~" (id) VALUES (1), (2), (3), (4), (5)"]),
+    Collector = self(),
+    Streamed = kura_stream:stream(
+        ?REPO,
+        kura_query:order_by(kura_query:from(rows()), [{id, asc}]),
+        fun(Batch) ->
+            Collector ! {batch, [Id || #{id := Id} <- Batch]},
+            ok
+        end,
+        #{batch_size => 2}
+    ),
+    ?assertEqual(ok, Streamed),
+    ?assertEqual([[1, 2], [3, 4], [5]], batches());
 runs(partial_indexes) ->
     Index = <<(table())/binary, "_named">>,
     ok = sql([~"CREATE INDEX ", Index, ~" ON ", table(), ~" (name) WHERE name IS NOT NULL"]),
@@ -260,6 +308,7 @@ setup() ->
         {error, {already_started, _}} -> ok
     end,
     ok = wait_for_ready(?POOL, 5000),
+    ok = ?REPO:start(),
     ok = sql(~"CREATE EXTENSION IF NOT EXISTS vector"),
     ok = sql([~"DROP TABLE IF EXISTS ", table()]),
     sql([
@@ -270,6 +319,7 @@ setup() ->
 
 teardown(_) ->
     _ = query([~"DROP TABLE IF EXISTS ", table()], []),
+    ok = ?REPO:stop(),
     _ = kura_pool_minato:stop_pool(?POOL),
     ok.
 
@@ -281,6 +331,15 @@ table() ->
 
 rows() ->
     kura_test_capability_schema.
+
+locked(Id, Lock) ->
+    kura_query:lock(kura_query:where(kura_query:from(rows()), {id, Id}), Lock).
+
+batches() ->
+    receive
+        {batch, Ids} -> [Ids | batches()]
+    after 0 -> []
+    end.
 
 insert(Id) ->
     sql([~"INSERT INTO ", table(), ~" (id) VALUES (", integer_to_binary(Id), ~")"]).

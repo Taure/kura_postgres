@@ -42,7 +42,8 @@ transaction and resets the session before it lends the connection again.
     checkout/2,
     checkin/2,
     give_away/3,
-    capabilities/0
+    capabilities/0,
+    capability_model/0
 ]).
 
 -export([open_transaction/1, run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
@@ -90,6 +91,9 @@ capabilities() ->
         advisory_locks,
         listen_notify,
         select_for_update_skip_locked,
+        row_locks,
+        distinct_on,
+        cursors,
         partial_indexes,
         window_functions,
         full_text_search,
@@ -99,6 +103,15 @@ capabilities() ->
         prepared_statements,
         concurrent_indexes
     ].
+
+-doc """
+The revision of kura's capability checks that `capabilities/0` was written
+against. Under model 2 kura also checks a query for `row_locks` and
+`distinct_on`, and `kura_stream` for `cursors`. A kura that knows no models
+never calls this.
+""".
+-spec capability_model() -> pos_integer().
+capability_model() -> 2.
 
 -doc """
 Start a pool.
