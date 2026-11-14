@@ -1,6 +1,5 @@
 -module(kura_dialect_pg_tests).
 -include_lib("eunit/include/eunit.hrl").
--include_lib("kura/include/kura.hrl").
 
 -eqwalizer({nowarn_function, join_test/0}).
 -eqwalizer({nowarn_function, left_join_test/0}).
