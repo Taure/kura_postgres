@@ -343,15 +343,11 @@ held(Pool, Conn, Monitor, Transaction) ->
 answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts}) ->
     try ran(Within, Conn, Sql, Params, Opts) of
         {lost, Answer} ->
-            minato_pool:discard(Pool, Conn),
-            Alias ! {Alias, reported(Within, Answer, unknown)},
-            ok;
+            lost(Pool, Conn, Alias, reported(Within, Answer, unknown));
         {continue, Answer, Next} ->
             case became(Within, Answer, Next, Opts) of
                 {lost, Lost} ->
-                    minato_pool:discard(Pool, Next),
-                    Alias ! {Alias, reported(Within, Lost, unknown)},
-                    ok;
+                    lost(Pool, Next, Alias, reported(Within, Lost, unknown));
                 {Status, Checked} ->
                     Alias ! {Alias, reported(Within, Answer, Status)},
                     held(Pool, Checked, Monitor, still(Within, Status, Transaction))
@@ -362,6 +358,12 @@ answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts})
             Alias ! {Alias, {raised, Class, Reason, Stack}},
             ok
     end.
+
+-spec lost(kura_pool:name(), minato_conn:conn(), reference(), term()) -> ok.
+lost(Pool, Conn, Alias, Reported) ->
+    minato_pool:discard(Pool, Conn),
+    Alias ! {Alias, Reported},
+    ok.
 
 -spec became(within(), dynamic(), minato_conn:conn(), map()) ->
     {transaction_status(), minato_conn:conn()} | {lost, {error, term()}}.
