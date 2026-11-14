@@ -9,8 +9,8 @@ of the [minato](https://hex.pm/packages/minato) client. The shared SQL emitter
 
 ```erlang
 {deps, [
-    {kura, "~> 2.4"},
-    {kura_postgres, "~> 0.4"}
+    {kura, "~> 2.28"},
+    {kura_postgres, "~> 1.1"}
 ]}.
 ```
 
@@ -40,9 +40,9 @@ transaction that `transaction/4` opened, outermost or nested, raises
 `error({kura_driver_minato, transaction_ended_by_statement})`. The driver reads
 the transaction status and command tag the server reports after every
 statement, so whatever the statement committed stays committed and nothing after
-it runs outside the transaction. A sandboxed test (`kura_sandbox`) is not
-covered: it runs its statements through `query_on/4`. See the
-`kura_driver_minato` module docs for every error `transaction/4` can raise.
+it runs outside the transaction. The transaction of a sandboxed test
+(`kura_sandbox`) is checked the same way. See the `kura_driver_minato` module
+docs for every error `transaction/4` can raise.
 
 ## Capabilities
 
@@ -54,6 +54,11 @@ covered: it runs its statements through `query_on/4`. See the
  full_text_search, vector, transactions, savepoints,
  prepared_statements, concurrent_indexes]
 ```
+
+Each is run against PostgreSQL 16 in `kura_postgres_capabilities_tests`. The
+list is the same for every database: `vector` is declared whether or not the
+[pgvector](https://github.com/pgvector/pgvector) extension is installed, and a
+distance query fails on the server without it.
 
 ## License
 

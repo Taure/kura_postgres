@@ -74,7 +74,13 @@ it from.
 -define(OPEN_TRANSACTION, ~"BEGIN; SET LOCAL kura.txn = '1'").
 -define(MARKER, ~"SELECT current_setting('kura.txn', true)").
 
--doc "What this backend supports. Read by `kura_capabilities`.".
+-doc """
+What this backend supports. Read by `kura_capabilities`.
+
+The list does not depend on the database a pool connects to. `vector` is
+declared whether or not the pgvector extension is installed there: without
+it the server refuses a `{vector, N}` column or a distance.
+""".
 -spec capabilities() -> kura_capabilities:capability_set().
 capabilities() ->
     [
