@@ -135,9 +135,11 @@ silently. Fix: the real DB host must be in kura's config at boot (use
 
 `test/` runs against a real Postgres (host port **5555**, db `kura_test`, user
 `postgres`, password `root`; see `docker-compose.yml`). Suites:
-`kura_driver_minato_tests`, `kura_pool_minato_tests` (pool + capability set), and
-`kura_dialect_pg_tests` (the shared core emitter). `kura_test_schema` /
-`kura_test_post_schema` are fixtures. CI brings up `docker-compose.ci.yml`
+`kura_driver_minato_tests`, `kura_pool_minato_tests` (pool + capability set),
+`kura_postgres_capabilities_tests` (each declared capability, run on the server;
+the image carries pgvector for `vector`) and `kura_dialect_pg_tests` (the shared
+core emitter). `kura_test_schema`, `kura_test_post_schema` and
+`kura_test_capability_schema` are fixtures. CI brings up `docker-compose.ci.yml`
 (tmpfs Postgres) via `extra-services-compose`.
 
 ## CI
