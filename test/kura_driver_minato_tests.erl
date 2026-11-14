@@ -27,6 +27,17 @@ with_pool_test_() ->
         ]
     end}.
 
+ensure_database_test_() ->
+    {setup, fun setup/0, fun teardown/1, fun(_) ->
+        {foreach, fun() -> dropped(made_database()) end, fun(_) -> dropped(made_database()) end, [
+            {"a config that names no database is left alone", fun no_database_named/0},
+            {"a missing database is created and an existing one is kept",
+                fun missing_database_is_created/0},
+            {"ssl in the config is asked of the server", fun ssl_comes_from_the_config/0},
+            {"ssl in the kura environment is not read", fun ssl_in_the_environment_is_not_read/0}
+        ]}
+    end}.
+
 nested_test_() ->
     {setup, fun nested_setup/0, fun nested_teardown/1, fun(_) ->
         {foreach, fun emptied/0, fun(_) -> ok end, [
@@ -321,6 +332,58 @@ doubly_nested_raise() ->
         ?assertEqual([], seen_elsewhere())
     end),
     ?assertEqual([1, 2, 4], ids(nested_table())).
+
+%%----------------------------------------------------------------------
+%% ensure_database/1
+%%----------------------------------------------------------------------
+
+no_database_named() ->
+    ?assertEqual(ok, kura_driver_minato:ensure_database(maps:remove(database, ?CONFIG))),
+    ?assertNot(exists(made_database())).
+
+missing_database_is_created() ->
+    Config = config(#{database => made_database()}),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())).
+
+%% The test server speaks no TLS, so a connection that asks for it is refused
+%% and nothing is created.
+ssl_comes_from_the_config() ->
+    Config = config(#{
+        database => made_database(), ssl => true, ssl_options => [{verify, verify_none}]
+    }),
+    ?assertMatch({error, _}, kura_driver_minato:ensure_database(Config)),
+    ?assertNot(exists(made_database())).
+
+ssl_in_the_environment_is_not_read() ->
+    Before = application:get_env(kura, ssl),
+    ok = application:set_env(kura, ssl, true),
+    try
+        ?assertEqual(
+            ok, kura_driver_minato:ensure_database(config(#{database => made_database()}))
+        ),
+        ?assert(exists(made_database()))
+    after
+        case Before of
+            {ok, Value} -> application:set_env(kura, ssl, Value);
+            undefined -> application:unset_env(kura, ssl)
+        end
+    end.
+
+config(Changed) ->
+    maps:merge(?CONFIG, Changed).
+
+made_database() ->
+    table(~"kura_driver_made").
+
+exists(Database) ->
+    #{rows := Rows} = query(~"SELECT 1 AS found FROM pg_database WHERE datname = $1", [Database]),
+    Rows =/= [].
+
+dropped(Database) ->
+    sql([~"DROP DATABASE IF EXISTS ", Database]).
 
 %%----------------------------------------------------------------------
 %% helpers

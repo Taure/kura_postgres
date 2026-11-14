@@ -175,7 +175,13 @@ transaction(_PoolMod, Pool, Fun, _Opts) ->
         Holder -> nested(Holder, Fun)
     end.
 
--doc "Create the database named in `Config` if it is not there.".
+-doc """
+Create the database named in `Config` if it is not there.
+
+`Config` is the repo's configuration, and the connection is made from it the
+way the repo's pool is: over TLS when it has `ssl => true`, with its
+`ssl_options`.
+""".
 -spec ensure_database(map()) -> ok | {error, term()}.
 ensure_database(Config) ->
     case Config of
@@ -370,7 +376,7 @@ connection(Config, Database) ->
         database => Database,
         connect_timeout => 5000
     },
-    secured(passworded(Base, Config)).
+    secured(passworded(Base, Config), Config).
 
 -spec passworded(map(), map()) -> map().
 passworded(Base, Config) ->
@@ -379,12 +385,11 @@ passworded(Base, Config) ->
         #{} -> Base
     end.
 
--spec secured(map()) -> map().
-secured(Base) ->
-    case application:get_env(kura, ssl, false) of
-        true -> Base#{ssl => true, ssl_options => application:get_env(kura, ssl_options, [])};
-        _Plain -> Base
-    end.
+-spec secured(map(), map()) -> map().
+secured(Base, #{ssl := true} = Config) ->
+    Base#{ssl => true, ssl_options => maps:get(ssl_options, Config, [])};
+secured(Base, _Plain) ->
+    Base.
 
 -spec host(map()) -> string().
 host(Config) ->

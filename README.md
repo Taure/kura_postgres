@@ -32,6 +32,9 @@ Point kura at the backend in `sys.config`:
 On application start, Kura resolves the aggregator and auto-populates `dialect`,
 `pool_module`, and `driver_module`. Per-key overrides still win.
 
+`ssl => true` and `ssl_options` in a repo's configuration apply to its pool and
+to the connection that creates a missing database.
+
 ## Transactions
 
 `kura_driver_minato:transaction/4` runs a nested call under a `SAVEPOINT`. A
