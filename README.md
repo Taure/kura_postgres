@@ -60,8 +60,10 @@ docs for every error `transaction/4` can raise.
 
 That is every standard capability of `kura_capabilities`.
 `kura_pool_minato:capability_model/0` names the revision of kura's checks the
-list is written against, the one that covers `row_locks`, `distinct_on` and
-`cursors`. kura releases after 2.30 read it; an older kura does not call it.
+list is written against: model 1, which checks a query for full-text search,
+a window function, a vector distance, a lock and `DISTINCT ON`, and
+`kura_stream` for `cursors`. kura releases after 2.30 read it; an older kura
+does not call it.
 
 Each is run against PostgreSQL 16 in `kura_postgres_capabilities_tests`. The
 list is the same for every database: `vector` is declared whether or not the

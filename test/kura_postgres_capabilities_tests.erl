@@ -32,6 +32,14 @@ the_backend_declares_what_the_pool_declares_test() ->
     ?assertEqual(kura_pool_minato:capabilities(), kura_backend_postgres:capabilities()),
     ?assertEqual(kura_pool_minato:capability_model(), kura_backend_postgres:capability_model()).
 
+%% A kura that reads the model does not start a pool whose model it does
+%% not know. kura 2.30 has no validate/1 and never reads it.
+the_model_is_one_kura_knows_test() ->
+    case lists:member({validate, 1}, kura_capabilities:module_info(exports)) of
+        true -> ?assertEqual(ok, kura_capabilities:validate(kura_pool_minato));
+        false -> ok
+    end.
+
 %% The model number lives in kura_pool_minato alone. Whatever it is, every
 %% capability kura checks a query or a stream for is declared.
 the_checked_capabilities_are_declared_test() ->

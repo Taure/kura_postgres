@@ -106,12 +106,13 @@ capabilities() ->
 
 -doc """
 The revision of kura's capability checks that `capabilities/0` was written
-against. Under model 2 kura also checks a query for `row_locks` and
-`distinct_on`, and `kura_stream` for `cursors`. A kura that knows no models
-never calls this.
+against. Model 1 checks a query for `full_text_search`, `window_functions`,
+`vector`, `select_for_update_skip_locked`, `row_locks` and `distinct_on`,
+and `kura_stream` for `cursors`. A kura that knows no models never calls
+this.
 """.
 -spec capability_model() -> pos_integer().
-capability_model() -> 2.
+capability_model() -> 1.
 
 -doc """
 Start a pool.
