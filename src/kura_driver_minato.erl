@@ -178,9 +178,9 @@ transaction(_PoolMod, Pool, Fun, _Opts) ->
 -doc "Create the database named in `Config` if it is not there.".
 -spec ensure_database(map()) -> ok | {error, term()}.
 ensure_database(Config) ->
-    case maps:find(database, Config) of
-        error -> ok;
-        {ok, Database} -> ensured(Config, binary(Database))
+    case Config of
+        #{database := Database} -> ensured(Config, binary(Database));
+        #{} -> ok
     end.
 
 -doc "Round trip a trivial statement against `Pool`.".
@@ -374,9 +374,9 @@ connection(Config, Database) ->
 
 -spec passworded(map(), map()) -> map().
 passworded(Base, Config) ->
-    case maps:find(password, Config) of
-        {ok, Password} -> Base#{password => binary(Password)};
-        error -> Base
+    case Config of
+        #{password := Password} -> Base#{password => binary(Password)};
+        #{} -> Base
     end.
 
 -spec secured(map()) -> map().
