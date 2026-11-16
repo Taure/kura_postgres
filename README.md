@@ -14,7 +14,7 @@ of the [minato](https://hex.pm/packages/minato) client. The shared SQL emitter
 ]}.
 ```
 
-kura_postgres needs kura 2.31 or a later 2.x and minato 1.2 or a later 1.x.
+kura_postgres needs kura 2.31.1 or a later 2.x and minato 1.2 or a later 1.x.
 See [Upgrading](#upgrading) for what those two change for a repo.
 
 Point kura at the backend in `sys.config`:
@@ -68,13 +68,15 @@ three of:
 {channel_binding, require}
 ```
 
-A setting minato does not take is refused before anything is started or
-connected to. `kura_repo_worker:start/1` and `kura_db:start_pool/1` return
+A setting minato checks and does not take is refused before anything is
+started or connected to. `kura_repo_worker:start/1` and `kura_db:start_pool/1` return
 `{error, {invalid_option, Key}}` and kura logs that the pool did not start.
 `Key` is the setting, without its value: `ssl_options` given without
 `ssl => true`, a `channel_binding` that is not one of the three words, an
 `auth` that is not a list of methods, a `timeout` that is `"5000"` and not
-`5000`, a `pool_size` that is not a positive integer.
+`5000`, a `pool_size` that is not a positive integer, a
+`prepared_statements` that is not a whole number from 0 up. `port`,
+`transport` and `socket_options` are not checked before the pool starts.
 
 Only the keys in the table are read. A repo's configuration holds kura's own
 settings too, so a key this backend does not know is passed over, not
@@ -126,7 +128,7 @@ distance query fails on the server without it.
 ### From 1.1
 
 1.1 ran on minato 1.1 and any kura from 2.28. This release needs minato 1.2
-and kura 2.31. kura's
+and kura 2.31.1 or a later 2.x. kura's
 [upgrading guide](https://hexdocs.pm/kura/upgrading.html) says what 2.31
 changes for an application, and minato's
 [changelog](https://hexdocs.pm/minato/changelog.html) what 1.2 does. What
@@ -140,7 +142,12 @@ reaches a repo through this backend:
   given, so a repo that set one ran on minato's default.
 - The connection that creates a missing database is opened with the same
   settings as the pool's, `channel_binding` and `auth` included, and a
-  configuration the pool refuses is refused there too.
+  configuration the pool refuses is refused there too. It no longer reads
+  `ssl` and `ssl_options` from the `kura` application environment: set them
+  on the repo, or the database is created over a connection without TLS.
+- When a configuration has both `host` and `hostname`, or both `user` and
+  `username`, `host` and `user` are read. The pool used to read `hostname`
+  and `username`.
 - A statement's deadline covers its whole answer. A result that takes longer
   than the repo's `timeout`, 15 seconds unless set, to arrive is cancelled
   with SQLSTATE `57014`, where it used to be read to the end. Raise the

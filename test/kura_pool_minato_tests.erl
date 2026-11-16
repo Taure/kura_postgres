@@ -204,9 +204,29 @@ a_refused_setting_starts_nothing_test_() ->
             {"a password that is not text", password, #{password => 1234}},
             {"a host that is not a name", host, #{host => 5432}},
             {"a pool size that is text", pool_size, #{pool_size => "10"}},
-            {"a pool size of none", pool_size, #{pool_size => 0}}
+            {"a pool size of none", pool_size, #{pool_size => 0}},
+            {"a statement limit that is not a number", prepared_statements, #{
+                prepared_statements => true
+            }},
+            {"a statement limit that is text", prepared_statements, #{prepared_statements => "64"}},
+            {"a statement limit below none", prepared_statements, #{prepared_statements => -1}}
         ]
     ].
+
+host_and_user_are_read_before_their_other_names_test() ->
+    {ok, Connection} = kura_pool_minato:connection(#{
+        host => ~"db.internal",
+        hostname => ~"other.internal",
+        user => ~"app",
+        username => ~"other"
+    }),
+    ?assertMatch(#{host := "db.internal", user := ~"app"}, Connection).
+
+hostname_and_username_are_read_when_they_stand_alone_test() ->
+    {ok, Connection} = kura_pool_minato:connection(#{
+        hostname => ~"other.internal", username => ~"other"
+    }),
+    ?assertMatch(#{host := "other.internal", user := ~"other"}, Connection).
 
 refused_before_starting(Key, Changed) ->
     {ok, _} = application:ensure_all_started(minato),

@@ -120,8 +120,8 @@ silently. Fix: the real DB host must be in kura's config at boot (use
   startup crashes with `{no_pool_module_configured, Repo}`. Prefer the v2
   `{repos, #{Name => #{backend => kura_backend_postgres, ...}}}` map form. CI
   only boots dev config, so prod-config drift ships silently - verify BOTH.
-- **Only connection settings reach minato.** `kura_pool_minato:connection/1`
-  picks them out of the repo map (`hostname` and `username` are read as `host`
+- **Only connection settings reach minato.** `kura_pool_minato` picks them
+  out of the repo map (`hostname` and `username` are read as `host`
   and `user`) and drops every other key, because kura hands a pool module its
   own settings too and minato 1.2 refuses a key it does not know. A misspelt
   setting is therefore dropped, not refused, and minato's default stays in

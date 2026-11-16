@@ -148,9 +148,12 @@ The connection settings are checked with `minato_conn:validate/1` before
 anything is started, and a `pool_size` that is not a positive integer is
 refused with them: `{error, {invalid_option, Key}}`. `Key` is `pool_size`, or
 minato's name for a connection setting, which is `host` for `hostname` and
-`user` for `username`. See `connection/1`. minato would refuse the same
-settings in the pool process it had already started, which ends in a crash
-report.
+`user` for `username`. A `prepared_statements` that is not a whole number
+from 0 up is refused the same way. minato would refuse the same settings in
+the pool process it had already started, which ends in a crash report.
+
+When a config has both `host` and `hostname`, or both `user` and `username`,
+`host` and `user` are the ones read.
 
 A name that is already running returns `{error, {already_started, Pid}}` with
 the running pool's pid, and that pool keeps the options it was started with.
@@ -174,29 +177,19 @@ start_pool(_Name, _Opts) ->
 started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
 started({error, Reason}) -> {error, Reason}.
 
--doc """
-The options minato opens a connection with for a repo's config, or the first
-setting minato would refuse. Used by `start_pool/2` and by
-`m:kura_driver_minato`, so the connection `ensure_database/1` opens is the one
-a pool of the same config would open.
-
-`hostname` is read as `host` and `username` as `user`. A key that is not a
-connection setting, which a repo's config is full of, is left out, since
-minato refuses a key it does not know.
-
-`{error, {invalid_option, Key}}` is what `minato_conn:validate/1` answers:
-`ssl_options` without `ssl => true`, a `channel_binding`, `auth`, `ssl` or
-`password` minato does not know, a `host` that is not a name or an address,
-or a `timeout`, `connect_timeout` or `cancel_timeout` that is not a number of
-milliseconds or `infinity`. The value is not in the reason.
-""".
+-doc false.
 -spec connection(map()) -> {ok, minato_conn:opts()} | {error, {invalid_option, atom()}}.
 connection(Opts) ->
     Connection = maps:fold(fun connection/3, #{}, Opts),
-    case minato_conn:validate(Connection) of
+    case statements_bounded(Connection) andalso minato_conn:validate(Connection) of
+        false -> {error, {invalid_option, prepared_statements}};
         ok -> {ok, Connection};
         {error, Reason} -> {error, Reason}
     end.
+
+-spec statements_bounded(map()) -> boolean().
+statements_bounded(#{prepared_statements := Limit}) -> is_integer(Limit) andalso Limit >= 0;
+statements_bounded(_Connection) -> true.
 
 -doc "Stop a pool. A pool that is not running is not an error.".
 -spec stop_pool(kura_pool:name()) -> ok.
@@ -503,10 +496,12 @@ translate(Opts) ->
 
 -spec connection(term(), term(), map()) -> map().
 connection(host, Value, Connection) -> Connection#{host => text(Value)};
+connection(hostname, _Value, #{host := _} = Connection) -> Connection;
 connection(hostname, Value, Connection) -> Connection#{host => text(Value)};
 connection(port, Value, Connection) -> Connection#{port => Value};
 connection(database, Value, Connection) -> Connection#{database => binary(Value)};
 connection(user, Value, Connection) -> Connection#{user => binary(Value)};
+connection(username, _Value, #{user := _} = Connection) -> Connection;
 connection(username, Value, Connection) -> Connection#{user => binary(Value)};
 connection(password, Value, Connection) -> Connection#{password => password(Value)};
 connection(ssl, Value, Connection) -> Connection#{ssl => Value};

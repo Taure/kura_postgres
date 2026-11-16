@@ -210,7 +210,7 @@ transaction(_PoolMod, Pool, Fun, _Opts) ->
 Create the database named in `Config` if it is not there.
 
 `Config` is the repo's configuration, and the connection is the one a pool of
-that config opens, as `kura_pool_minato:connection/1` reads it: the same host
+that config opens, as `kura_pool_minato:start_pool/2` reads it: the same host
 and credentials, TLS when it has `ssl => true`, and its `channel_binding` and
 `auth`. A server the pool would not log in to is not logged in to here.
 
