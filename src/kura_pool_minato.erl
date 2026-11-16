@@ -136,6 +136,14 @@ start a pool whose connections cannot log in.
 other as the way back from that choice, which is only true from here if the
 option survives the translation.
 
+So are the settings that decide how a connection is secured and what it
+keeps, each as minato documents it: `ssl`, `ssl_options`, `channel_binding`,
+`auth`, `prepared_statements`, `socket_options`, `timeout`, `connect_timeout`
+and `cancel_timeout`. `channel_binding => require` with `auth =>
+[scram_sha_256]` and `ssl => true` is what minato recommends towards a server
+on a network anybody else is on, and `prepared_statements => 0` is what a
+pooler that does not follow named statements needs.
+
 The connection settings are checked with `minato_conn:validate/1` before
 anything is started, and a `pool_size` that is not a positive integer is
 refused with them: `{error, {invalid_option, Key}}`, where `Key` is the
@@ -506,7 +514,11 @@ connection(queue_target, _Value, Connection) -> Connection;
 connection(queue_interval, _Value, Connection) -> Connection;
 connection(connect_timeout, Value, Connection) -> Connection#{connect_timeout => Value};
 connection(timeout, Value, Connection) -> Connection#{timeout => Value};
+connection(cancel_timeout, Value, Connection) -> Connection#{cancel_timeout => Value};
 connection(transport, Value, Connection) -> Connection#{transport => Value};
+connection(channel_binding, Value, Connection) -> Connection#{channel_binding => Value};
+connection(auth, Value, Connection) -> Connection#{auth => Value};
+connection(prepared_statements, Value, Connection) -> Connection#{prepared_statements => Value};
 connection(_Key, _Value, Connection) -> Connection.
 
 -spec password(dynamic()) -> binary() | fun(() -> binary()).

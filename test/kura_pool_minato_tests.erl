@@ -91,6 +91,72 @@ a_pool_given_username_is_started_test() ->
     _ = kura_pool_minato:stop_pool(Name),
     ok.
 
+the_settings_minato_takes_reach_it_test() ->
+    Asked = #{
+        ssl => true,
+        ssl_options => [{verify, verify_peer}],
+        channel_binding => require,
+        auth => [scram_sha_256],
+        prepared_statements => 0,
+        connect_timeout => 3000,
+        timeout => 20000,
+        cancel_timeout => 2000,
+        transport => inet,
+        socket_options => [{keepalive, true}]
+    },
+    {ok, Connection} = kura_pool_minato:connection(maps:merge(?CONFIG, Asked)),
+    ?assertEqual(Asked, maps:with(maps:keys(Asked), Connection)).
+
+%% The test server asks for SCRAM-SHA-256 and speaks no TLS, so it can be
+%% bound to nothing and is refused before the password is used.
+a_required_channel_binding_is_asked_of_the_server_test() ->
+    Config = ?CONFIG,
+    {ok, Connection} = kura_pool_minato:connection(Config#{channel_binding => require}),
+    ?assertEqual(
+        {error, {channel_binding_required, scram_sha_256}}, minato_conn:connect(Connection)
+    ).
+
+a_method_left_out_of_auth_is_refused_test() ->
+    Config = ?CONFIG,
+    {ok, Connection} = kura_pool_minato:connection(Config#{auth => [md5]}),
+    ?assertEqual({error, {auth_method_refused, scram_sha_256}}, minato_conn:connect(Connection)).
+
+a_pool_restricted_to_the_method_the_server_asks_for_logs_in_test() ->
+    Name = kura_pool_minato_auth_test,
+    Config = ?CONFIG,
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, Config#{auth => [scram_sha_256]}),
+    try
+        ?assertEqual(ok, wait_for_ready(Name, 5000))
+    after
+        kura_pool_minato:stop_pool(Name)
+    end.
+
+%% One connection, so both statements run on the same session. minato keeps a
+%% statement parsed under a name unless told to keep none.
+prepared_statements_test_() ->
+    [
+        {"a pool keeps statements parsed by default", fun() ->
+            ?assertNotEqual(0, statements_kept(#{}))
+        end},
+        {"a pool told to keep no statements keeps none", fun() ->
+            ?assertEqual(0, statements_kept(#{prepared_statements => 0}))
+        end}
+    ].
+
+statements_kept(Changed) ->
+    Name = kura_pool_minato_statements_test,
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, maps:merge(?CONFIG, Changed#{pool_size => 1})),
+    try
+        ok = wait_for_ready(Name, 5000),
+        {ok, #{rows := [{1}]}} = minato:query(Name, ~"SELECT $1::integer", [1]),
+        {ok, #{rows := [{Kept}]}} = minato:query(
+            Name, ~"SELECT count(*)::integer FROM pg_prepared_statements", []
+        ),
+        Kept
+    after
+        kura_pool_minato:stop_pool(Name)
+    end.
+
 %% minato refuses each of these in the pool process it has already started,
 %% which ends in a crash report. Asked first, nothing is started or logged.
 a_refused_setting_starts_nothing_test_() ->
@@ -102,6 +168,11 @@ a_refused_setting_starts_nothing_test_() ->
             {"an ssl that is not a boolean", ssl, #{ssl => ~"true"}},
             {"a timeout that is text", timeout, #{timeout => "5000"}},
             {"a connect timeout that is text", connect_timeout, #{connect_timeout => ~"5000"}},
+            {"a cancel timeout that is text", cancel_timeout, #{cancel_timeout => "5000"}},
+            {"a channel binding minato has no word for", channel_binding, #{
+                channel_binding => required
+            }},
+            {"authentication methods that are not a list", auth, #{auth => scram_sha_256}},
             {"a password that is not text", password, #{password => 1234}},
             {"a host that is not a name", host, #{host => 5432}},
             {"a pool size that is text", pool_size, #{pool_size => "10"}},
