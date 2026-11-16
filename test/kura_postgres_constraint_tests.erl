@@ -19,6 +19,7 @@ constraint_field_test_() ->
         true ->
             {setup, fun setup/0, fun teardown/1, fun(_) ->
                 {foreach, fun emptied/0, fun(_) -> ok end, [
+                    {"a renamed column is read into its field", fun renamed_column_is_read/0},
                     {"a unique violation on a renamed column", fun unique_on_a_renamed_column/0},
                     {"a duplicate key", fun duplicate_key/0},
                     {"a missing value in a renamed column", fun not_null_on_a_renamed_column/0},
@@ -34,8 +35,13 @@ constraint_field_test_() ->
             []
     end.
 
+%% No atom is named after the column: the driver hands the row over keyed by
+%% the column's name as a binary, and the field is the schema's to find.
+renamed_column_is_read() ->
+    ?assertMatch({ok, #{id := 1, title := ~"a"}}, inserted(#{id => 1, title => ~"a"})).
+
 unique_on_a_renamed_column() ->
-    ?assertMatch({ok, #{id := 1, title := ~"a"}}, inserted(#{id => 1, title => ~"a"})),
+    {ok, _} = inserted(#{id => 1, title => ~"a"}),
     ?assertEqual([{title, ~"has already been taken"}], refused(#{id => 2, title => ~"a"})).
 
 duplicate_key() ->
