@@ -68,12 +68,12 @@ Run before every push, all green:
 `rebar3 fmt --check`. Bring the Docker Postgres up first or the driver/pool
 suites cannot run.
 
-CI (Taure/erlang-ci) additionally runs coverage + sbom; eqwalize/mutate are
-disabled here.
+CI (Taure/erlang-ci) additionally runs coverage, audit and, on a pull request,
+`elp lint` and `elp eqwalize-all`; mutate is disabled here.
 
 ## Conventions
 
-- OTP 28 (`.tool-versions`: erlang 28.4.1, rebar 3.26.0). The `~"..."` sigil for
+- OTP 28 (`.tool-versions`: erlang 28.4.1, rebar 3.28.0). The `~"..."` sigil for
   binaries, never `<<"...">>`.
 - No `lists:foldl/foldr` - list comprehensions + `maps:from_list`, or explicit
   named recursion.
@@ -120,10 +120,17 @@ silently. Fix: the real DB host must be in kura's config at boot (use
   startup crashes with `{no_pool_module_configured, Repo}`. Prefer the v2
   `{repos, #{Name => #{backend => kura_backend_postgres, ...}}}` map form. CI
   only boots dev config, so prod-config drift ships silently - verify BOTH.
-- **Config keys are `host`/`user`, not `hostname`/`username`.** The repo map is
-  passed verbatim to the client, which ignores unknown keys and silently
-  defaults `host` to localhost. Symptom: pool stuck `none_available`, migration
-  bails before any DDL. Grep any kura app for `hostname =>`/`username =>`.
+- **Only connection settings reach minato.** `kura_pool_minato:connection/1`
+  picks them out of the repo map (`hostname` and `username` are read as `host`
+  and `user`) and drops every other key, because kura hands a pool module its
+  own settings too and minato 1.2 refuses a key it does not know. A misspelt
+  setting is therefore dropped, not refused, and minato's default stays in
+  force. A setting minato does refuse (`ssl_options` without `ssl => true`, a
+  `timeout` that is a string) comes back from `start_pool/2` as
+  `{error, {invalid_option, Key}}` before anything is started.
+- **Row keys are atoms only for atoms that exist.** minato 1.2 makes no atom
+  from a column name, so a column no loaded module names comes back under a
+  binary key.
 - **`string` = VARCHAR(255), `text` = unbounded.** Picking `string` for
   arbitrary-length data crashes inserts with `value too long for type character
   varying(255)`. Use `text` for anything unbounded.
@@ -139,7 +146,8 @@ silently. Fix: the real DB host must be in kura's config at boot (use
 `kura_postgres_capabilities_tests` (each declared capability, run on the server;
 the image carries pgvector for `vector`; `row_locks`, `distinct_on` and `cursors`
 go through kura's own API), `kura_postgres_constraint_tests` (which field a
-constraint error lands on; needs a kura after 2.30) and `kura_dialect_pg_tests`
+constraint error lands on, and a renamed column read into its field) and
+`kura_dialect_pg_tests`
 (the shared core emitter). `kura_postgres_test_repo` is the repo those use;
 `kura_test_schema`, `kura_test_post_schema`, `kura_test_capability_schema` and
 `kura_test_order_line_schema` are fixtures. CI brings up `docker-compose.ci.yml`
@@ -148,8 +156,10 @@ constraint error lands on; needs a kura after 2.30) and `kura_dialect_pg_tests`
 ## CI
 
 CI calls `Taure/erlang-ci` (pinned exact version). Enabled: ct, ex_doc, hank,
-coverage, sbom, sbom-scan, dependency-submission, elp-lint, summary. Currently
-off: eqwalize, mutate, audit, sheldon. Do not float the erlang-ci pin.
+audit, coverage, dependency-submission, elp-lint, elp-eqwalize, summary.
+Currently off: sbom, sbom-scan, mutate, sheldon. On a push to `main` the same
+workflow tags a release once CI is green and publishes it to Hex. Do not float
+the erlang-ci pin.
 
 ## Git and PRs
 
