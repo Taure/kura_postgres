@@ -114,7 +114,7 @@ where_fragment_test() ->
         {fragment, <<"lower(name) = ?">>, [<<"alice">>]}
     ),
     {SQL, Params} = kura_dialect_pg:to_sql(Q),
-    ?assertEqual(<<"SELECT * FROM \"user\" WHERE lower(name) = $1">>, SQL),
+    ?assertEqual(~"SELECT * FROM \"user\" WHERE (lower(name) = $1\n)", SQL),
     ?assertEqual([<<"alice">>], Params).
 
 %%----------------------------------------------------------------------
