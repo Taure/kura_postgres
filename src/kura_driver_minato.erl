@@ -184,9 +184,13 @@ transaction(_PoolMod, Pool, Fun, _Opts) ->
 -doc """
 Create the database named in `Config` if it is not there.
 
-`Config` is the repo's configuration, and the connection is made from it the
-way the repo's pool is: over TLS when it has `ssl => true`, with its
-`ssl_options`.
+`Config` is the repo's configuration, and the connection is the one a pool of
+that config opens, as `kura_pool_minato:connection/1` reads it: the same host
+and credentials, TLS when it has `ssl => true`, and its `channel_binding` and
+`auth`. A server the pool would not log in to is not logged in to here.
+
+A config minato would refuse answers `{error, {invalid_option, Key}}` before
+anything is connected to. A config without a `user` connects as `postgres`.
 """.
 -spec ensure_database(map()) -> ok | {error, term()}.
 ensure_database(Config) ->
@@ -340,17 +344,28 @@ opened(Holder) ->
 
 -spec ensured(map(), binary()) -> ok | {error, term()}.
 ensured(Config, Database) ->
-    case minato_conn:connect(connection(Config, Database)) of
-        {ok, Conn} -> minato_conn:close(Conn);
-        {error, _Missing} -> created(Config, Database)
+    case kura_pool_minato:connection(with_user(Config)) of
+        {ok, Connection} -> reached(Connection, Database);
+        {error, Reason} -> {error, Reason}
     end.
 
--spec created(map(), binary()) -> ok | {error, term()}.
-created(Config, Database) ->
-    case minato_conn:connect(connection(Config, ~"postgres")) of
+-spec reached(minato_conn:opts(), binary()) -> ok | {error, term()}.
+reached(Connection, Database) ->
+    case minato_conn:connect(Connection#{database => Database}) of
+        {ok, Conn} -> minato_conn:close(Conn);
+        {error, _Missing} -> created(Connection, Database)
+    end.
+
+-spec created(minato_conn:opts(), binary()) -> ok | {error, term()}.
+created(Connection, Database) ->
+    case minato_conn:connect(Connection#{database => ~"postgres"}) of
         {ok, Conn} -> creating(Conn, Database);
         {error, Reason} -> {error, Reason}
     end.
+
+-spec with_user(map()) -> map().
+with_user(Config) when is_map_key(user, Config); is_map_key(username, Config) -> Config;
+with_user(Config) -> Config#{user => ~"postgres"}.
 
 -spec creating(minato_conn:conn(), binary()) -> ok | {error, term()}.
 creating(Conn, Database) ->
@@ -372,48 +387,6 @@ creating(Conn, Database) ->
 close({ok, _Results, Conn}, _Fallback) -> minato_conn:close(Conn);
 close({error, _Reason, Conn}, _Fallback) -> minato_conn:close(Conn);
 close({error, _Reason}, Fallback) -> minato_conn:close(Fallback).
-
--spec connection(map(), binary()) -> minato_conn:opts().
-connection(Config, Database) ->
-    Base = #{
-        host => host(Config),
-        port => maps:get(port, Config, 5432),
-        user => binary(first([user, username], Config, ~"postgres")),
-        database => Database,
-        connect_timeout => 5000
-    },
-    secured(passworded(Base, Config), Config).
-
--spec passworded(map(), map()) -> map().
-passworded(Base, Config) ->
-    case Config of
-        #{password := Password} -> Base#{password => binary(Password)};
-        #{} -> Base
-    end.
-
--spec secured(map(), map()) -> map().
-secured(Base, #{ssl := true} = Config) ->
-    Base#{ssl => true, ssl_options => maps:get(ssl_options, Config, [])};
-secured(Base, _Plain) ->
-    Base.
-
--spec host(map()) -> string().
-host(Config) ->
-    case first([host, hostname], Config, ~"localhost") of
-        Value when is_binary(Value) -> binary_to_list(Value);
-        Value when is_list(Value) -> Value;
-        Value when is_atom(Value) -> atom_to_list(Value)
-    end.
-
-%% Config values come from the application environment.
--spec first([atom()], map(), term()) -> dynamic().
-first([], _Config, Default) ->
-    Default;
-first([Key | Rest], Config, Default) ->
-    case maps:find(Key, Config) of
-        {ok, Value} when is_binary(Value); is_list(Value); is_atom(Value) -> Value;
-        _Absent -> first(Rest, Config, Default)
-    end.
 
 %%----------------------------------------------------------------------
 %% Options and shapes

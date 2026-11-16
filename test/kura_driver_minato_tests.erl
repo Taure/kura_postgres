@@ -34,7 +34,15 @@ ensure_database_test_() ->
             {"a missing database is created and an existing one is kept",
                 fun missing_database_is_created/0},
             {"ssl in the config is asked of the server", fun ssl_comes_from_the_config/0},
-            {"ssl in the kura environment is not read", fun ssl_in_the_environment_is_not_read/0}
+            {"ssl in the kura environment is not read", fun ssl_in_the_environment_is_not_read/0},
+            {"TLS options without ssl are refused before anything is connected to",
+                fun ssl_options_need_ssl/0},
+            {"a required channel binding is asked of the server",
+                fun channel_binding_comes_from_the_config/0},
+            {"the methods the server may ask for come from the config",
+                fun auth_comes_from_the_config/0},
+            {"a config without a user connects as postgres", fun user_defaults_to_postgres/0},
+            {"a host given as a binary is connected to", fun host_as_a_binary/0}
         ]}
     end}.
 
@@ -371,6 +379,40 @@ ssl_in_the_environment_is_not_read() ->
             undefined -> application:unset_env(kura, ssl)
         end
     end.
+
+ssl_options_need_ssl() ->
+    Config = config(#{database => made_database(), ssl_options => [{verify, verify_none}]}),
+    ?assertEqual(
+        {error, {invalid_option, ssl_options}}, kura_driver_minato:ensure_database(Config)
+    ),
+    ?assertNot(exists(made_database())).
+
+%% The test server asks for SCRAM-SHA-256 and speaks no TLS.
+channel_binding_comes_from_the_config() ->
+    Config = config(#{database => made_database(), channel_binding => require}),
+    ?assertEqual(
+        {error, {channel_binding_required, scram_sha_256}},
+        kura_driver_minato:ensure_database(Config)
+    ),
+    ?assertNot(exists(made_database())).
+
+auth_comes_from_the_config() ->
+    Config = config(#{database => made_database(), auth => [md5]}),
+    ?assertEqual(
+        {error, {auth_method_refused, scram_sha_256}},
+        kura_driver_minato:ensure_database(Config)
+    ),
+    ?assertNot(exists(made_database())).
+
+user_defaults_to_postgres() ->
+    Config = maps:remove(user, config(#{database => made_database()})),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())).
+
+host_as_a_binary() ->
+    Config = config(#{database => made_database(), host => ~"localhost"}),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())).
 
 config(Changed) ->
     maps:merge(?CONFIG, Changed).
