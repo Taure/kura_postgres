@@ -146,8 +146,9 @@ pooler that does not follow named statements needs.
 
 The connection settings are checked with `minato_conn:validate/1` before
 anything is started, and a `pool_size` that is not a positive integer is
-refused with them: `{error, {invalid_option, Key}}`, where `Key` is the
-setting as minato names it. See `connection/1`. minato would refuse the same
+refused with them: `{error, {invalid_option, Key}}`. `Key` is `pool_size`, or
+minato's name for a connection setting, which is `host` for `hostname` and
+`user` for `username`. See `connection/1`. minato would refuse the same
 settings in the pool process it had already started, which ends in a crash
 report.
 
