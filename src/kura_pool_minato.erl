@@ -47,6 +47,7 @@ transaction and resets the session before it lends the connection again.
 ]).
 
 -export([open_transaction/1, run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
+-export([connection/1]).
 
 -ifdef(TEST).
 -export([marked/2]).
@@ -135,20 +136,58 @@ start a pool whose connections cannot log in.
 other as the way back from that choice, which is only true from here if the
 option survives the translation.
 
+The connection settings are checked with `minato_conn:validate/1` before
+anything is started, and a `pool_size` that is not a positive integer is
+refused with them: `{error, {invalid_option, Key}}`, where `Key` is the
+setting as minato names it. See `connection/1`. minato would refuse the same
+settings in the pool process it had already started, which ends in a crash
+report.
+
 A name that is already running returns `{error, {already_started, Pid}}` with
 the running pool's pid, and that pool keeps the options it was started with.
 kura tells a fresh start from a running pool by this answer, so a second repo
 naming the same pool is not told the pool was started for it.
+
+`minato_overdue` and `minato_sup` are minato's own processes and cannot name
+a pool: `{error, {reserved_name, Name}}`.
 """.
 -spec start_pool(kura_pool:name(), kura_pool:opts()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Opts) when is_map_key(user, Opts); is_map_key(username, Opts) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    case minato:start_pool(Name, translate(Opts)) of
-        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+    case translate(Opts) of
+        {ok, Translated} -> started(minato:start_pool(Name, Translated));
         {error, Reason} -> {error, Reason}
     end;
 start_pool(_Name, _Opts) ->
     {error, {missing_option, user}}.
+
+-spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
+started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
+started({error, Reason}) -> {error, Reason}.
+
+-doc """
+The options minato opens a connection with for a repo's config, or the first
+setting minato would refuse. Used by `start_pool/2` and by
+`m:kura_driver_minato`, so the connection `ensure_database/1` opens is the one
+a pool of the same config would open.
+
+`hostname` is read as `host` and `username` as `user`. A key that is not a
+connection setting, which a repo's config is full of, is left out, since
+minato refuses a key it does not know.
+
+`{error, {invalid_option, Key}}` is what `minato_conn:validate/1` answers:
+`ssl_options` without `ssl => true`, a `channel_binding`, `auth`, `ssl` or
+`password` minato does not know, a `host` that is not a name or an address,
+or a `timeout`, `connect_timeout` or `cancel_timeout` that is not a number of
+milliseconds or `infinity`. The value is not in the reason.
+""".
+-spec connection(map()) -> {ok, minato_conn:opts()} | {error, {invalid_option, atom()}}.
+connection(Opts) ->
+    Connection = maps:fold(fun connection/3, #{}, Opts),
+    case minato_conn:validate(Connection) of
+        ok -> {ok, Connection};
+        {error, Reason} -> {error, Reason}
+    end.
 
 -doc "Stop a pool. A pool that is not running is not an error.".
 -spec stop_pool(kura_pool:name()) -> ok.
@@ -441,10 +480,16 @@ call(Holder, Message, Timeout) ->
 %% kura options to minato options
 %%----------------------------------------------------------------------
 
--spec translate(map()) -> minato_pool:opts().
+-spec translate(map()) -> {ok, minato_pool:opts()} | {error, {invalid_option, atom()}}.
 translate(Opts) ->
-    Connection = maps:fold(fun connection/3, #{}, Opts),
-    #{size => maps:get(pool_size, Opts, 10), connection => Connection}.
+    case {maps:get(pool_size, Opts, 10), connection(Opts)} of
+        {Size, {ok, Connection}} when is_integer(Size), Size >= 1 ->
+            {ok, #{size => Size, connection => Connection}};
+        {_Size, {ok, _Connection}} ->
+            {error, {invalid_option, pool_size}};
+        {_Size, {error, Reason}} ->
+            {error, Reason}
+    end.
 
 -spec connection(term(), term(), map()) -> map().
 connection(host, Value, Connection) -> Connection#{host => text(Value)};

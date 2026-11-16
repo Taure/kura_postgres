@@ -1,7 +1,7 @@
 -module(kura_pool_minato_tests).
 -include_lib("eunit/include/eunit.hrl").
 
--export([slow_checkout_stop/4]).
+-export([slow_checkout_stop/4, log/2]).
 
 -define(POOL, kura_pool_minato_test).
 -define(CONFIG, #{
@@ -90,6 +90,52 @@ a_pool_given_username_is_started_test() ->
     ?assertEqual(ok, wait_for_ready(Name, 5000)),
     _ = kura_pool_minato:stop_pool(Name),
     ok.
+
+%% minato refuses each of these in the pool process it has already started,
+%% which ends in a crash report. Asked first, nothing is started or logged.
+a_refused_setting_starts_nothing_test_() ->
+    [
+        {Label, fun() -> refused_before_starting(Key, Changed) end}
+     || {Label, Key, Changed} <- [
+            {"TLS options without ssl", ssl_options, #{ssl_options => [{verify, verify_peer}]}},
+            {"TLS options with ssl off", ssl_options, #{ssl => false, ssl_options => []}},
+            {"an ssl that is not a boolean", ssl, #{ssl => ~"true"}},
+            {"a timeout that is text", timeout, #{timeout => "5000"}},
+            {"a connect timeout that is text", connect_timeout, #{connect_timeout => ~"5000"}},
+            {"a password that is not text", password, #{password => 1234}},
+            {"a host that is not a name", host, #{host => 5432}},
+            {"a pool size that is text", pool_size, #{pool_size => "10"}},
+            {"a pool size of none", pool_size, #{pool_size => 0}}
+        ]
+    ].
+
+refused_before_starting(Key, Changed) ->
+    {ok, _} = application:ensure_all_started(minato),
+    Name = kura_pool_minato_refused_test,
+    ok = logger:add_handler(?MODULE, ?MODULE, #{config => self(), level => error}),
+    try
+        ?assertEqual(
+            {error, {invalid_option, Key}},
+            kura_pool_minato:start_pool(Name, maps:merge(?CONFIG, Changed))
+        ),
+        ?assertEqual([], crash_reports()),
+        ?assertEqual([], [Id || {Id, _, _, _} <- supervisor:which_children(minato_sup), Id =:= Name])
+    after
+        ok = logger:remove_handler(?MODULE),
+        _ = kura_pool_minato:stop_pool(Name)
+    end.
+
+log(#{msg := {report, #{label := {proc_lib, crash}} = Report}}, #{config := Collector}) ->
+    Collector ! {crash_report, Report},
+    ok;
+log(_Event, _Config) ->
+    ok.
+
+crash_reports() ->
+    receive
+        {crash_report, Report} -> [Report | crash_reports()]
+    after 100 -> []
+    end.
 
 setup() ->
     application:ensure_all_started(minato),
