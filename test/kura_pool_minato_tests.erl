@@ -224,6 +224,25 @@ refused_before_starting(Key, Changed) ->
         _ = kura_pool_minato:stop_pool(Name)
     end.
 
+%% Through kura, which is how an application meets it.
+a_repo_with_a_refused_setting_is_told_which_test() ->
+    {ok, _} = application:ensure_all_started(kura),
+    Repo = kura_postgres_test_repo,
+    Config = ?CONFIG,
+    ok = application:set_env(kura_postgres, Repo, Config#{
+        pool => kura_pool_minato_refused_repo_test,
+        pool_module => kura_backend_postgres:pool_module(),
+        driver_module => kura_backend_postgres:driver_module(),
+        dialect => kura_backend_postgres:dialect(),
+        ssl_options => [{verify, verify_peer}]
+    }),
+    try
+        ?assertEqual({error, {invalid_option, ssl_options}}, kura_repo_worker:start(Repo))
+    after
+        ok = application:unset_env(kura_postgres, Repo),
+        kura_db:stop_pool(Repo)
+    end.
+
 log(#{msg := {report, #{label := {proc_lib, crash}} = Report}}, #{config := Collector}) ->
     Collector ! {crash_report, Report},
     ok;
