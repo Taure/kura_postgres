@@ -91,6 +91,34 @@ a_pool_given_username_is_started_test() ->
     _ = kura_pool_minato:stop_pool(Name),
     ok.
 
+%% kura hands a pool module everything in the repo's config, and minato
+%% refuses a key it has no option by.
+what_is_not_a_connection_setting_stays_out_test() ->
+    Config = ?CONFIG,
+    {ok, Connection} = kura_pool_minato:connection(Config#{
+        max_page_size => 100,
+        log => true,
+        queue_target => 50,
+        queue_interval => 1000,
+        ~"a key that is no atom" => 1
+    }),
+    ?assertEqual([database, host, password, port, user], lists:sort(maps:keys(Connection))).
+
+a_name_minato_keeps_for_itself_starts_no_pool_test_() ->
+    [
+        {atom_to_list(Name), fun() ->
+            {ok, _} = application:ensure_all_started(minato),
+            Running = whereis(Name),
+            ?assertEqual(
+                {error, {reserved_name, Name}}, kura_pool_minato:start_pool(Name, ?CONFIG)
+            ),
+            ?assertEqual(ok, kura_pool_minato:stop_pool(Name)),
+            ?assert(is_pid(Running)),
+            ?assertEqual(Running, whereis(Name))
+        end}
+     || Name <- [minato_sup, minato_overdue]
+    ].
+
 the_settings_minato_takes_reach_it_test() ->
     Asked = #{
         ssl => true,

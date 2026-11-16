@@ -23,7 +23,11 @@ with_pool_test_() ->
             {"a COMMIT the server rejects raises", fun rejected_commit_raises/0},
             {"a COMMIT that gets no answer raises as unknown", fun unanswered_commit_raises/0},
             {"a COMMIT the server ends the session on raises as unknown",
-                fun ended_commit_raises_unknown/0}
+                fun ended_commit_raises_unknown/0},
+            {"a column is keyed by an atom only where that atom exists",
+                fun column_keys_are_existing_atoms/0},
+            {"a result still arriving at its deadline is cancelled and the connection kept",
+                fun arriving_result_is_cancelled/0}
         ]
     end}.
 
@@ -246,6 +250,26 @@ unanswered_commit_raises() ->
         end)
     ),
     ?assertEqual(ok, wait_for_ready(?POOL, 5000)).
+
+column_keys_are_existing_atoms() ->
+    #{rows := [Row]} = query(
+        ~"SELECT 1::integer AS id, 2::integer AS kura_driver_column_no_atom_names", []
+    ),
+    ?assertEqual(#{id => 1, ~"kura_driver_column_no_atom_names" => 2}, Row).
+
+%% The rows are sent as they are generated, so the server is still sending
+%% when the deadline passes.
+arriving_result_is_cancelled() ->
+    #{disconnects := Before} = minato:stats(?POOL),
+    Started = erlang:monotonic_time(millisecond),
+    Result = kura_driver_minato:query(
+        kura_pool_minato, ?POOL, ~"SELECT generate_series(1, 5000000)", [], #{timeout => 100}
+    ),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}}, Result),
+    ?assert(Elapsed < 2000),
+    ?assertMatch(#{disconnects := Before}, minato:stats(?POOL)),
+    ?assertMatch(#{rows := [#{n := 1}]}, query(~"SELECT 1::integer AS n", [])).
 
 nested_raise_undoes_only_its_work() ->
     transaction(fun() ->
