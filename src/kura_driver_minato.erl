@@ -16,11 +16,21 @@ passed.
 
 ## Results and errors
 
-minato answers `#{command := atom(), num_rows := integer(), rows := [row()]}`,
+minato answers `#{command := Command, num_rows := integer(), rows := [row()]}`,
 which is the shape kura already reads, and a failing statement answers `{error,
 {pgsql_error, Fields}}` with `code` and `constraint` as binaries - which is what
 `kura_repo_worker` turns into a changeset error. Nothing in kura had to change
 for either.
+
+Neither a command nor a column's name is made into an atom, since both are
+bytes the server chose. `Command` is an atom for every tag PostgreSQL has
+(`select`, `insert`, `commit` and so on) and the binary the server sent for
+any other word. A row is a map keyed by column: by an atom where the name is
+an atom on this node already, which the names a caller's own code matches on
+are, and by the binary the server sent otherwise. So `#{id := Id}` matches as
+it always did, and a column aliased at run time, or one no loaded module
+mentions, is under a binary key. Before minato 1.2 every name was made an
+atom.
 
 ## numeric
 
@@ -80,6 +90,21 @@ check. The `RESET ALL` caveat above applies there too.
 the read. minato cancels a statement that outlives it on the server and reads
 the cancellation through, so a slow query comes back as SQLSTATE `57014` and the
 connection goes back to the pool rather than being closed.
+
+The deadline covers the whole answer, from minato 1.2 on: a result that is
+still arriving when it passes is cancelled the same way, where rows that kept
+coming used to be read to the end. Without `timeout` in the driver options the
+deadline is the repo's `timeout`, 15 seconds unless the config sets it, and
+kura passes none of a caller's options for a query built from a schema. A
+result that takes longer than that to arrive needs the repo's `timeout`
+raised, or reading in parts: `kura_stream`, which fetches through a cursor,
+or pages.
+
+A cancelled statement has the repo's `cancel_timeout`, 5 seconds unless set,
+to acknowledge. A server that does not is given up on, as `{error, {socket,
+timeout}}`, and the connection is closed. A write is bounded too: a server
+that stops reading costs the connection after the repo's `timeout`, which a
+`send_timeout` in `socket_options` replaces.
 """.
 
 -behaviour(kura_driver).

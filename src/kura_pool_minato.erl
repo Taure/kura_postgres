@@ -266,11 +266,12 @@ give_away(_Token, _NotAPid, _GiftData) ->
 Run a statement on a held connection. Used by `m:kura_driver_minato`.
 
 `timeout` in `Opts` is handed to minato, which cancels the statement on the
-server when it expires. It can shorten a statement but not lengthen it: minato
-still gives up on any single read after the connection's own read timeout. The
-wait for the holder's answer is not bounded here, so whatever ends the statement
-comes back as its error rather than the caller giving up first. A pool whose
-`timeout` is `infinity` therefore waits as long as the socket does.
+server when it expires, whether the server has gone quiet or is still sending
+the result. It can shorten a statement that sends nothing but not lengthen it:
+minato still gives up on any single read after the connection's own read
+timeout. The wait for the holder's answer is not bounded here, so whatever ends
+the statement comes back as its error rather than the caller giving up first. A
+pool whose `timeout` is `infinity` therefore waits as long as the socket does.
 """.
 -spec run(pid(), iodata(), [term()], map()) -> dynamic().
 run(Holder, Sql, Params, Opts) ->
