@@ -1,7 +1,7 @@
 -module(kura_pool_minato_tests).
 -include_lib("eunit/include/eunit.hrl").
 
--export([slow_checkout_stop/4]).
+-export([slow_checkout_stop/4, log/2]).
 
 -define(POOL, kura_pool_minato_test).
 -define(CONFIG, #{
@@ -91,6 +91,190 @@ a_pool_given_username_is_started_test() ->
     _ = kura_pool_minato:stop_pool(Name),
     ok.
 
+%% kura hands a pool module everything in the repo's config, and minato
+%% refuses a key it has no option by.
+what_is_not_a_connection_setting_stays_out_test() ->
+    Config = ?CONFIG,
+    {ok, Connection} = kura_pool_minato:connection(Config#{
+        max_page_size => 100,
+        log => true,
+        queue_target => 50,
+        queue_interval => 1000,
+        ~"a key that is no atom" => 1
+    }),
+    ?assertEqual([database, host, password, port, user], lists:sort(maps:keys(Connection))).
+
+a_name_minato_keeps_for_itself_starts_no_pool_test_() ->
+    [
+        {atom_to_list(Name), fun() ->
+            {ok, _} = application:ensure_all_started(minato),
+            Running = whereis(Name),
+            ?assertEqual(
+                {error, {reserved_name, Name}}, kura_pool_minato:start_pool(Name, ?CONFIG)
+            ),
+            ?assertEqual(ok, kura_pool_minato:stop_pool(Name)),
+            ?assert(is_pid(Running)),
+            ?assertEqual(Running, whereis(Name))
+        end}
+     || Name <- [minato_sup, minato_overdue]
+    ].
+
+the_settings_minato_takes_reach_it_test() ->
+    Asked = #{
+        ssl => true,
+        ssl_options => [{verify, verify_peer}],
+        channel_binding => require,
+        auth => [scram_sha_256],
+        prepared_statements => 0,
+        connect_timeout => 3000,
+        timeout => 20000,
+        cancel_timeout => 2000,
+        transport => inet,
+        socket_options => [{keepalive, true}]
+    },
+    {ok, Connection} = kura_pool_minato:connection(maps:merge(?CONFIG, Asked)),
+    ?assertEqual(Asked, maps:with(maps:keys(Asked), Connection)).
+
+%% The test server asks for SCRAM-SHA-256 and speaks no TLS, so it can be
+%% bound to nothing and is refused before the password is used.
+a_required_channel_binding_is_asked_of_the_server_test() ->
+    Config = ?CONFIG,
+    {ok, Connection} = kura_pool_minato:connection(Config#{channel_binding => require}),
+    ?assertEqual(
+        {error, {channel_binding_required, scram_sha_256}}, minato_conn:connect(Connection)
+    ).
+
+a_method_left_out_of_auth_is_refused_test() ->
+    Config = ?CONFIG,
+    {ok, Connection} = kura_pool_minato:connection(Config#{auth => [md5]}),
+    ?assertEqual({error, {auth_method_refused, scram_sha_256}}, minato_conn:connect(Connection)).
+
+a_pool_restricted_to_the_method_the_server_asks_for_logs_in_test() ->
+    Name = kura_pool_minato_auth_test,
+    Config = ?CONFIG,
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, Config#{auth => [scram_sha_256]}),
+    try
+        ?assertEqual(ok, wait_for_ready(Name, 5000))
+    after
+        kura_pool_minato:stop_pool(Name)
+    end.
+
+%% One connection, so both statements run on the same session. minato keeps a
+%% statement parsed under a name unless told to keep none.
+prepared_statements_test_() ->
+    [
+        {"a pool keeps statements parsed by default", fun() ->
+            ?assertNotEqual(0, statements_kept(#{}))
+        end},
+        {"a pool told to keep no statements keeps none", fun() ->
+            ?assertEqual(0, statements_kept(#{prepared_statements => 0}))
+        end}
+    ].
+
+statements_kept(Changed) ->
+    Name = kura_pool_minato_statements_test,
+    {ok, _Pid} = kura_pool_minato:start_pool(Name, maps:merge(?CONFIG, Changed#{pool_size => 1})),
+    try
+        ok = wait_for_ready(Name, 5000),
+        {ok, #{rows := [{1}]}} = minato:query(Name, ~"SELECT $1::integer", [1]),
+        {ok, #{rows := [{Kept}]}} = minato:query(
+            Name, ~"SELECT count(*)::integer FROM pg_prepared_statements", []
+        ),
+        Kept
+    after
+        kura_pool_minato:stop_pool(Name)
+    end.
+
+%% minato refuses each of these in the pool process it has already started,
+%% which ends in a crash report. Asked first, nothing is started or logged.
+a_refused_setting_starts_nothing_test_() ->
+    [
+        {Label, fun() -> refused_before_starting(Key, Changed) end}
+     || {Label, Key, Changed} <- [
+            {"TLS options without ssl", ssl_options, #{ssl_options => [{verify, verify_peer}]}},
+            {"TLS options with ssl off", ssl_options, #{ssl => false, ssl_options => []}},
+            {"an ssl that is not a boolean", ssl, #{ssl => ~"true"}},
+            {"a timeout that is text", timeout, #{timeout => "5000"}},
+            {"a connect timeout that is text", connect_timeout, #{connect_timeout => ~"5000"}},
+            {"a cancel timeout that is text", cancel_timeout, #{cancel_timeout => "5000"}},
+            {"a channel binding minato has no word for", channel_binding, #{
+                channel_binding => required
+            }},
+            {"authentication methods that are not a list", auth, #{auth => scram_sha_256}},
+            {"a password that is not text", password, #{password => 1234}},
+            {"a host that is not a name", host, #{host => 5432}},
+            {"a pool size that is text", pool_size, #{pool_size => "10"}},
+            {"a pool size of none", pool_size, #{pool_size => 0}},
+            {"a statement limit that is not a number", prepared_statements, #{
+                prepared_statements => true
+            }},
+            {"a statement limit that is text", prepared_statements, #{prepared_statements => "64"}},
+            {"a statement limit below none", prepared_statements, #{prepared_statements => -1}}
+        ]
+    ].
+
+host_and_user_are_read_before_their_other_names_test() ->
+    {ok, Connection} = kura_pool_minato:connection(#{
+        host => ~"db.internal",
+        hostname => ~"other.internal",
+        user => ~"app",
+        username => ~"other"
+    }),
+    ?assertMatch(#{host := "db.internal", user := ~"app"}, Connection).
+
+hostname_and_username_are_read_when_they_stand_alone_test() ->
+    {ok, Connection} = kura_pool_minato:connection(#{
+        hostname => ~"other.internal", username => ~"other"
+    }),
+    ?assertMatch(#{host := "other.internal", user := ~"other"}, Connection).
+
+refused_before_starting(Key, Changed) ->
+    {ok, _} = application:ensure_all_started(minato),
+    Name = kura_pool_minato_refused_test,
+    ok = logger:add_handler(?MODULE, ?MODULE, #{config => self(), level => error}),
+    try
+        ?assertEqual(
+            {error, {invalid_option, Key}},
+            kura_pool_minato:start_pool(Name, maps:merge(?CONFIG, Changed))
+        ),
+        ?assertEqual([], crash_reports()),
+        ?assertEqual([], [Id || {Id, _, _, _} <- supervisor:which_children(minato_sup), Id =:= Name])
+    after
+        ok = logger:remove_handler(?MODULE),
+        _ = kura_pool_minato:stop_pool(Name)
+    end.
+
+%% Through kura, which is how an application meets it.
+a_repo_with_a_refused_setting_is_told_which_test() ->
+    {ok, _} = application:ensure_all_started(kura),
+    Repo = kura_postgres_test_repo,
+    Config = ?CONFIG,
+    ok = application:set_env(kura_postgres, Repo, Config#{
+        pool => kura_pool_minato_refused_repo_test,
+        pool_module => kura_backend_postgres:pool_module(),
+        driver_module => kura_backend_postgres:driver_module(),
+        dialect => kura_backend_postgres:dialect(),
+        ssl_options => [{verify, verify_peer}]
+    }),
+    try
+        ?assertEqual({error, {invalid_option, ssl_options}}, kura_repo_worker:start(Repo))
+    after
+        ok = application:unset_env(kura_postgres, Repo),
+        kura_db:stop_pool(Repo)
+    end.
+
+log(#{msg := {report, #{label := {proc_lib, crash}} = Report}}, #{config := Collector}) ->
+    Collector ! {crash_report, Report},
+    ok;
+log(_Event, _Config) ->
+    ok.
+
+crash_reports() ->
+    receive
+        {crash_report, Report} -> [Report | crash_reports()]
+    after 100 -> []
+    end.
+
 setup() ->
     application:ensure_all_started(minato),
     application:ensure_all_started(kura),
@@ -114,30 +298,30 @@ capabilities_behaviour_declared() ->
     Behaviours = lists:append([V || {behaviour, V} <- Attrs] ++ [V || {behavior, V} <- Attrs]),
     ?assert(lists:member(kura_capabilities, Behaviours)).
 
+%% Every standard capability in kura_capabilities' documentation, and
+%% nothing else.
 capabilities_set() ->
-    %% require/2 with the full standard PG set should pass.
-    ?assertEqual(
-        ok,
-        kura_capabilities:require(
-            kura_pool_minato,
-            [
-                returning,
-                jsonb,
-                arrays,
-                advisory_locks,
-                listen_notify,
-                select_for_update_skip_locked,
-                partial_indexes,
-                window_functions,
-                full_text_search,
-                vector,
-                transactions,
-                savepoints,
-                prepared_statements,
-                concurrent_indexes
-            ]
-        )
-    ).
+    Standard = [
+        returning,
+        jsonb,
+        arrays,
+        advisory_locks,
+        listen_notify,
+        select_for_update_skip_locked,
+        row_locks,
+        distinct_on,
+        cursors,
+        partial_indexes,
+        concurrent_indexes,
+        window_functions,
+        full_text_search,
+        vector,
+        transactions,
+        savepoints,
+        prepared_statements
+    ],
+    ?assertEqual(ok, kura_capabilities:require(kura_pool_minato, Standard)),
+    ?assertEqual(lists:sort(Standard), lists:sort(kura_pool_minato:capabilities())).
 
 checkout_returns_conn() ->
     {ok, Conn, Token} = kura_pool_minato:checkout(?POOL, #{}),

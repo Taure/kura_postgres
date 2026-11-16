@@ -16,11 +16,21 @@ passed.
 
 ## Results and errors
 
-minato answers `#{command := atom(), num_rows := integer(), rows := [row()]}`,
+minato answers `#{command := Command, num_rows := integer(), rows := [row()]}`,
 which is the shape kura already reads, and a failing statement answers `{error,
 {pgsql_error, Fields}}` with `code` and `constraint` as binaries - which is what
 `kura_repo_worker` turns into a changeset error. Nothing in kura had to change
 for either.
+
+Neither a command nor a column's name is made into an atom, since both are
+bytes the server chose. `Command` is an atom for every tag PostgreSQL has
+(`select`, `insert`, `commit` and so on) and the binary the server sent for
+any other word. A row is a map keyed by column: by an atom where the name is
+an atom on this node already, which the names a caller's own code matches on
+are, and by the binary the server sent otherwise. So `#{id := Id}` matches as
+it always did, and a column aliased at run time, or one no loaded module
+mentions, is under a binary key. Before minato 1.2 every name was made an
+atom.
 
 ## numeric
 
@@ -29,8 +39,14 @@ back the exact decimal text, because that is what the type is for. kura has
 always given callers a float for it, through `pg_types`, and a driver swap is
 the wrong moment to change what `avg/1` returns for everybody.
 
-A repo that wants the exact form says `numeric_format => binary` in its driver
-options, and should, for anything that is money.
+So a `decimal` field read through a schema is a float, with the 15 to 17
+significant digits a float holds. kura passes this driver none of the caller's
+options on that path, so a repo cannot ask for anything else there.
+
+A statement run with `numeric_format => binary` in the options of `query/5` or
+`query_on/4`, which is where `kura_db:query_on/5` hands its options, gets the
+exact text: `~"12345678901234567.89"`. `kura_types:load/2` keeps that text as it
+is from kura 2.31, and turned it into a float before.
 
 ## Transaction control in user SQL
 
@@ -74,6 +90,21 @@ check. The `RESET ALL` caveat above applies there too.
 the read. minato cancels a statement that outlives it on the server and reads
 the cancellation through, so a slow query comes back as SQLSTATE `57014` and the
 connection goes back to the pool rather than being closed.
+
+The deadline covers the whole answer, from minato 1.2 on: a result that is
+still arriving when it passes is cancelled the same way, where rows that kept
+coming used to be read to the end. Without `timeout` in the driver options the
+deadline is the repo's `timeout`, 15 seconds unless the config sets it, and
+kura passes none of a caller's options for a query built from a schema. A
+result that takes longer than that to arrive needs the repo's `timeout`
+raised, or reading in parts: `kura_stream`, which fetches through a cursor,
+or pages.
+
+A cancelled statement has the repo's `cancel_timeout`, 5 seconds unless set,
+to acknowledge. A server that does not is given up on, as `{error, {socket,
+timeout}}`, and the connection is closed. A write is bounded too: a server
+that stops reading costs the connection after the repo's `timeout`, which a
+`send_timeout` in `socket_options` replaces.
 """.
 
 -behaviour(kura_driver).
@@ -175,12 +206,22 @@ transaction(_PoolMod, Pool, Fun, _Opts) ->
         Holder -> nested(Holder, Fun)
     end.
 
--doc "Create the database named in `Config` if it is not there.".
+-doc """
+Create the database named in `Config` if it is not there.
+
+`Config` is the repo's configuration, and the connection is the one a pool of
+that config opens, as `kura_pool_minato:start_pool/2` reads it: the same host
+and credentials, TLS when it has `ssl => true`, and its `channel_binding` and
+`auth`. A server the pool would not log in to is not logged in to here.
+
+A config minato would refuse answers `{error, {invalid_option, Key}}` before
+anything is connected to. A config without a `user` connects as `postgres`.
+""".
 -spec ensure_database(map()) -> ok | {error, term()}.
 ensure_database(Config) ->
-    case maps:find(database, Config) of
-        error -> ok;
-        {ok, Database} -> ensured(Config, binary(Database))
+    case Config of
+        #{database := Database} -> ensured(Config, binary(Database));
+        #{} -> ok
     end.
 
 -doc "Round trip a trivial statement against `Pool`.".
@@ -328,17 +369,28 @@ opened(Holder) ->
 
 -spec ensured(map(), binary()) -> ok | {error, term()}.
 ensured(Config, Database) ->
-    case minato_conn:connect(connection(Config, Database)) of
-        {ok, Conn} -> minato_conn:close(Conn);
-        {error, _Missing} -> created(Config, Database)
+    case kura_pool_minato:connection(with_user(Config)) of
+        {ok, Connection} -> reached(Connection, Database);
+        {error, Reason} -> {error, Reason}
     end.
 
--spec created(map(), binary()) -> ok | {error, term()}.
-created(Config, Database) ->
-    case minato_conn:connect(connection(Config, ~"postgres")) of
+-spec reached(minato_conn:opts(), binary()) -> ok | {error, term()}.
+reached(Connection, Database) ->
+    case minato_conn:connect(Connection#{database => Database}) of
+        {ok, Conn} -> minato_conn:close(Conn);
+        {error, _Missing} -> created(Connection, Database)
+    end.
+
+-spec created(minato_conn:opts(), binary()) -> ok | {error, term()}.
+created(Connection, Database) ->
+    case minato_conn:connect(Connection#{database => ~"postgres"}) of
         {ok, Conn} -> creating(Conn, Database);
         {error, Reason} -> {error, Reason}
     end.
+
+-spec with_user(map()) -> map().
+with_user(Config) when is_map_key(user, Config); is_map_key(username, Config) -> Config;
+with_user(Config) -> Config#{user => ~"postgres"}.
 
 -spec creating(minato_conn:conn(), binary()) -> ok | {error, term()}.
 creating(Conn, Database) ->
@@ -360,49 +412,6 @@ creating(Conn, Database) ->
 close({ok, _Results, Conn}, _Fallback) -> minato_conn:close(Conn);
 close({error, _Reason, Conn}, _Fallback) -> minato_conn:close(Conn);
 close({error, _Reason}, Fallback) -> minato_conn:close(Fallback).
-
--spec connection(map(), binary()) -> minato_conn:opts().
-connection(Config, Database) ->
-    Base = #{
-        host => host(Config),
-        port => maps:get(port, Config, 5432),
-        user => binary(first([user, username], Config, ~"postgres")),
-        database => Database,
-        connect_timeout => 5000
-    },
-    secured(passworded(Base, Config)).
-
--spec passworded(map(), map()) -> map().
-passworded(Base, Config) ->
-    case maps:find(password, Config) of
-        {ok, Password} -> Base#{password => binary(Password)};
-        error -> Base
-    end.
-
--spec secured(map()) -> map().
-secured(Base) ->
-    case application:get_env(kura, ssl, false) of
-        true -> Base#{ssl => true, ssl_options => application:get_env(kura, ssl_options, [])};
-        _Plain -> Base
-    end.
-
--spec host(map()) -> string().
-host(Config) ->
-    case first([host, hostname], Config, ~"localhost") of
-        Value when is_binary(Value) -> binary_to_list(Value);
-        Value when is_list(Value) -> Value;
-        Value when is_atom(Value) -> atom_to_list(Value)
-    end.
-
-%% Config values come from the application environment.
--spec first([atom()], map(), term()) -> dynamic().
-first([], _Config, Default) ->
-    Default;
-first([Key | Rest], Config, Default) ->
-    case maps:find(Key, Config) of
-        {ok, Value} when is_binary(Value); is_list(Value); is_atom(Value) -> Value;
-        _Absent -> first(Rest, Config, Default)
-    end.
 
 %%----------------------------------------------------------------------
 %% Options and shapes

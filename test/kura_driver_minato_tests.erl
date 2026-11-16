@@ -23,8 +23,31 @@ with_pool_test_() ->
             {"a COMMIT the server rejects raises", fun rejected_commit_raises/0},
             {"a COMMIT that gets no answer raises as unknown", fun unanswered_commit_raises/0},
             {"a COMMIT the server ends the session on raises as unknown",
-                fun ended_commit_raises_unknown/0}
+                fun ended_commit_raises_unknown/0},
+            {"a column is keyed by an atom only where that atom exists",
+                fun column_keys_are_existing_atoms/0},
+            {"a result still arriving at its deadline is cancelled and the connection kept",
+                fun arriving_result_is_cancelled/0}
         ]
+    end}.
+
+ensure_database_test_() ->
+    {setup, fun setup/0, fun teardown/1, fun(_) ->
+        {foreach, fun() -> dropped(made_database()) end, fun(_) -> dropped(made_database()) end, [
+            {"a config that names no database is left alone", fun no_database_named/0},
+            {"a missing database is created and an existing one is kept",
+                fun missing_database_is_created/0},
+            {"ssl in the config is asked of the server", fun ssl_comes_from_the_config/0},
+            {"ssl in the kura environment is not read", fun ssl_in_the_environment_is_not_read/0},
+            {"TLS options without ssl are refused before anything is connected to",
+                fun ssl_options_need_ssl/0},
+            {"a required channel binding is asked of the server",
+                fun channel_binding_comes_from_the_config/0},
+            {"the methods the server may ask for come from the config",
+                fun auth_comes_from_the_config/0},
+            {"a config without a user connects as postgres", fun user_defaults_to_postgres/0},
+            {"a host given as a binary is connected to", fun host_as_a_binary/0}
+        ]}
     end}.
 
 nested_test_() ->
@@ -228,6 +251,26 @@ unanswered_commit_raises() ->
     ),
     ?assertEqual(ok, wait_for_ready(?POOL, 5000)).
 
+column_keys_are_existing_atoms() ->
+    #{rows := [Row]} = query(
+        ~"SELECT 1::integer AS id, 2::integer AS kura_driver_column_no_atom_names", []
+    ),
+    ?assertEqual(#{id => 1, ~"kura_driver_column_no_atom_names" => 2}, Row).
+
+%% The rows are sent as they are generated, so the server is still sending
+%% when the deadline passes.
+arriving_result_is_cancelled() ->
+    #{disconnects := Before} = minato:stats(?POOL),
+    Started = erlang:monotonic_time(millisecond),
+    Result = kura_driver_minato:query(
+        kura_pool_minato, ?POOL, ~"SELECT generate_series(1, 5000000)", [], #{timeout => 100}
+    ),
+    Elapsed = erlang:monotonic_time(millisecond) - Started,
+    ?assertMatch({error, {pgsql_error, #{code := ~"57014"}}}, Result),
+    ?assert(Elapsed < 2000),
+    ?assertMatch(#{disconnects := Before}, minato:stats(?POOL)),
+    ?assertMatch(#{rows := [#{n := 1}]}, query(~"SELECT 1::integer AS n", [])).
+
 nested_raise_undoes_only_its_work() ->
     transaction(fun() ->
         ok = insert(1),
@@ -321,6 +364,92 @@ doubly_nested_raise() ->
         ?assertEqual([], seen_elsewhere())
     end),
     ?assertEqual([1, 2, 4], ids(nested_table())).
+
+%%----------------------------------------------------------------------
+%% ensure_database/1
+%%----------------------------------------------------------------------
+
+no_database_named() ->
+    ?assertEqual(ok, kura_driver_minato:ensure_database(maps:remove(database, ?CONFIG))),
+    ?assertNot(exists(made_database())).
+
+missing_database_is_created() ->
+    Config = config(#{database => made_database()}),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())).
+
+%% The test server speaks no TLS, so a connection that asks for it is refused
+%% and nothing is created.
+ssl_comes_from_the_config() ->
+    Config = config(#{
+        database => made_database(), ssl => true, ssl_options => [{verify, verify_none}]
+    }),
+    ?assertMatch({error, _}, kura_driver_minato:ensure_database(Config)),
+    ?assertNot(exists(made_database())).
+
+ssl_in_the_environment_is_not_read() ->
+    Before = application:get_env(kura, ssl),
+    ok = application:set_env(kura, ssl, true),
+    try
+        ?assertEqual(
+            ok, kura_driver_minato:ensure_database(config(#{database => made_database()}))
+        ),
+        ?assert(exists(made_database()))
+    after
+        case Before of
+            {ok, Value} -> application:set_env(kura, ssl, Value);
+            undefined -> application:unset_env(kura, ssl)
+        end
+    end.
+
+ssl_options_need_ssl() ->
+    Config = config(#{database => made_database(), ssl_options => [{verify, verify_none}]}),
+    ?assertEqual(
+        {error, {invalid_option, ssl_options}}, kura_driver_minato:ensure_database(Config)
+    ),
+    ?assertNot(exists(made_database())).
+
+%% The test server asks for SCRAM-SHA-256 and speaks no TLS.
+channel_binding_comes_from_the_config() ->
+    Config = config(#{database => made_database(), channel_binding => require}),
+    ?assertEqual(
+        {error, {channel_binding_required, scram_sha_256}},
+        kura_driver_minato:ensure_database(Config)
+    ),
+    ?assertNot(exists(made_database())).
+
+auth_comes_from_the_config() ->
+    Config = config(#{database => made_database(), auth => [md5]}),
+    ?assertEqual(
+        {error, {auth_method_refused, scram_sha_256}},
+        kura_driver_minato:ensure_database(Config)
+    ),
+    ?assertNot(exists(made_database())).
+
+user_defaults_to_postgres() ->
+    Config = maps:remove(user, config(#{database => made_database()})),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())).
+
+host_as_a_binary() ->
+    Config = config(#{database => made_database(), host => ~"localhost"}),
+    ?assertEqual(ok, kura_driver_minato:ensure_database(Config)),
+    ?assert(exists(made_database())).
+
+config(Changed) ->
+    maps:merge(?CONFIG, Changed).
+
+made_database() ->
+    table(~"kura_driver_made").
+
+exists(Database) ->
+    #{rows := Rows} = query(~"SELECT 1 AS found FROM pg_database WHERE datname = $1", [Database]),
+    Rows =/= [].
+
+dropped(Database) ->
+    sql([~"DROP DATABASE IF EXISTS ", Database]).
 
 %%----------------------------------------------------------------------
 %% helpers

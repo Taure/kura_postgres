@@ -42,10 +42,12 @@ transaction and resets the session before it lends the connection again.
     checkout/2,
     checkin/2,
     give_away/3,
-    capabilities/0
+    capabilities/0,
+    capability_model/0
 ]).
 
 -export([open_transaction/1, run/4, run_in_transaction/4, transaction_conn/1, in_transaction/2]).
+-export([connection/1]).
 
 -ifdef(TEST).
 -export([marked/2]).
@@ -74,7 +76,13 @@ it from.
 -define(OPEN_TRANSACTION, ~"BEGIN; SET LOCAL kura.txn = '1'").
 -define(MARKER, ~"SELECT current_setting('kura.txn', true)").
 
--doc "What this backend supports. Read by `kura_capabilities`.".
+-doc """
+What this backend supports. Read by `kura_capabilities`.
+
+The list does not depend on the database a pool connects to. `vector` is
+declared whether or not the pgvector extension is installed there: without
+it the server refuses a `{vector, N}` column or a distance.
+""".
 -spec capabilities() -> kura_capabilities:capability_set().
 capabilities() ->
     [
@@ -84,6 +92,9 @@ capabilities() ->
         advisory_locks,
         listen_notify,
         select_for_update_skip_locked,
+        row_locks,
+        distinct_on,
+        cursors,
         partial_indexes,
         window_functions,
         full_text_search,
@@ -93,6 +104,16 @@ capabilities() ->
         prepared_statements,
         concurrent_indexes
     ].
+
+-doc """
+The revision of kura's capability checks that `capabilities/0` was written
+against. Model 1 checks a query for `full_text_search`, `window_functions`,
+`vector`, `select_for_update_skip_locked`, `row_locks` and `distinct_on`,
+and `kura_stream` for `cursors`. A kura that knows no models never calls
+this.
+""".
+-spec capability_model() -> pos_integer().
+capability_model() -> 1.
 
 -doc """
 Start a pool.
@@ -115,20 +136,60 @@ start a pool whose connections cannot log in.
 other as the way back from that choice, which is only true from here if the
 option survives the translation.
 
+So are the settings that decide how a connection is secured and what it
+keeps, each as minato documents it: `ssl`, `ssl_options`, `channel_binding`,
+`auth`, `prepared_statements`, `socket_options`, `timeout`, `connect_timeout`
+and `cancel_timeout`. `channel_binding => require` with `auth =>
+[scram_sha_256]` and `ssl => true` is what minato recommends towards a server
+on a network anybody else is on, and `prepared_statements => 0` is what a
+pooler that does not follow named statements needs.
+
+The connection settings are checked with `minato_conn:validate/1` before
+anything is started, and a `pool_size` that is not a positive integer is
+refused with them: `{error, {invalid_option, Key}}`. `Key` is `pool_size`, or
+minato's name for a connection setting, which is `host` for `hostname` and
+`user` for `username`. A `prepared_statements` that is not a whole number
+from 0 up is refused the same way. minato would refuse the same settings in
+the pool process it had already started, which ends in a crash report.
+
+When a config has both `host` and `hostname`, or both `user` and `username`,
+`host` and `user` are the ones read.
+
 A name that is already running returns `{error, {already_started, Pid}}` with
 the running pool's pid, and that pool keeps the options it was started with.
 kura tells a fresh start from a running pool by this answer, so a second repo
 naming the same pool is not told the pool was started for it.
+
+`minato_overdue` and `minato_sup` are minato's own processes and cannot name
+a pool: `{error, {reserved_name, Name}}`.
 """.
 -spec start_pool(kura_pool:name(), kura_pool:opts()) -> {ok, pid()} | {error, term()}.
 start_pool(Name, Opts) when is_map_key(user, Opts); is_map_key(username, Opts) ->
     {ok, _Started} = application:ensure_all_started(minato),
-    case minato:start_pool(Name, translate(Opts)) of
-        {ok, Pid} when is_pid(Pid) -> {ok, Pid};
+    case translate(Opts) of
+        {ok, Translated} -> started(minato:start_pool(Name, Translated));
         {error, Reason} -> {error, Reason}
     end;
 start_pool(_Name, _Opts) ->
     {error, {missing_option, user}}.
+
+-spec started(supervisor:startchild_ret()) -> {ok, pid()} | {error, term()}.
+started({ok, Pid}) when is_pid(Pid) -> {ok, Pid};
+started({error, Reason}) -> {error, Reason}.
+
+-doc false.
+-spec connection(map()) -> {ok, minato_conn:opts()} | {error, {invalid_option, atom()}}.
+connection(Opts) ->
+    Connection = maps:fold(fun connection/3, #{}, Opts),
+    case statements_bounded(Connection) andalso minato_conn:validate(Connection) of
+        false -> {error, {invalid_option, prepared_statements}};
+        ok -> {ok, Connection};
+        {error, Reason} -> {error, Reason}
+    end.
+
+-spec statements_bounded(map()) -> boolean().
+statements_bounded(#{prepared_statements := Limit}) -> is_integer(Limit) andalso Limit >= 0;
+statements_bounded(_Connection) -> true.
 
 -doc "Stop a pool. A pool that is not running is not an error.".
 -spec stop_pool(kura_pool:name()) -> ok.
@@ -199,11 +260,12 @@ give_away(_Token, _NotAPid, _GiftData) ->
 Run a statement on a held connection. Used by `m:kura_driver_minato`.
 
 `timeout` in `Opts` is handed to minato, which cancels the statement on the
-server when it expires. It can shorten a statement but not lengthen it: minato
-still gives up on any single read after the connection's own read timeout. The
-wait for the holder's answer is not bounded here, so whatever ends the statement
-comes back as its error rather than the caller giving up first. A pool whose
-`timeout` is `infinity` therefore waits as long as the socket does.
+server when it expires, whether the server has gone quiet or is still sending
+the result. It can shorten a statement that sends nothing but not lengthen it:
+minato still gives up on any single read after the connection's own read
+timeout. The wait for the holder's answer is not bounded here, so whatever ends
+the statement comes back as its error rather than the caller giving up first. A
+pool whose `timeout` is `infinity` therefore waits as long as the socket does.
 """.
 -spec run(pid(), iodata(), [term()], map()) -> dynamic().
 run(Holder, Sql, Params, Opts) ->
@@ -323,15 +385,11 @@ held(Pool, Conn, Monitor, Transaction) ->
 answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts}) ->
     try ran(Within, Conn, Sql, Params, Opts) of
         {lost, Answer} ->
-            minato_pool:discard(Pool, Conn),
-            Alias ! {Alias, reported(Within, Answer, unknown)},
-            ok;
+            lost(Pool, Conn, Alias, reported(Within, Answer, unknown));
         {continue, Answer, Next} ->
             case became(Within, Answer, Next, Opts) of
                 {lost, Lost} ->
-                    minato_pool:discard(Pool, Next),
-                    Alias ! {Alias, reported(Within, Lost, unknown)},
-                    ok;
+                    lost(Pool, Next, Alias, reported(Within, Lost, unknown));
                 {Status, Checked} ->
                     Alias ! {Alias, reported(Within, Answer, Status)},
                     held(Pool, Checked, Monitor, still(Within, Status, Transaction))
@@ -342,6 +400,12 @@ answered(Pool, {Conn, Monitor, Transaction}, Alias, {Within, Sql, Params, Opts})
             Alias ! {Alias, {raised, Class, Reason, Stack}},
             ok
     end.
+
+-spec lost(kura_pool:name(), minato_conn:conn(), reference(), term()) -> ok.
+lost(Pool, Conn, Alias, Reported) ->
+    minato_pool:discard(Pool, Conn),
+    Alias ! {Alias, Reported},
+    ok.
 
 -spec became(within(), dynamic(), minato_conn:conn(), map()) ->
     {transaction_status(), minato_conn:conn()} | {lost, {error, term()}}.
@@ -419,17 +483,25 @@ call(Holder, Message, Timeout) ->
 %% kura options to minato options
 %%----------------------------------------------------------------------
 
--spec translate(map()) -> minato_pool:opts().
+-spec translate(map()) -> {ok, minato_pool:opts()} | {error, {invalid_option, atom()}}.
 translate(Opts) ->
-    Connection = maps:fold(fun connection/3, #{}, Opts),
-    #{size => maps:get(pool_size, Opts, 10), connection => Connection}.
+    case {maps:get(pool_size, Opts, 10), connection(Opts)} of
+        {Size, {ok, Connection}} when is_integer(Size), Size >= 1 ->
+            {ok, #{size => Size, connection => Connection}};
+        {_Size, {ok, _Connection}} ->
+            {error, {invalid_option, pool_size}};
+        {_Size, {error, Reason}} ->
+            {error, Reason}
+    end.
 
 -spec connection(term(), term(), map()) -> map().
 connection(host, Value, Connection) -> Connection#{host => text(Value)};
+connection(hostname, _Value, #{host := _} = Connection) -> Connection;
 connection(hostname, Value, Connection) -> Connection#{host => text(Value)};
 connection(port, Value, Connection) -> Connection#{port => Value};
 connection(database, Value, Connection) -> Connection#{database => binary(Value)};
 connection(user, Value, Connection) -> Connection#{user => binary(Value)};
+connection(username, _Value, #{user := _} = Connection) -> Connection;
 connection(username, Value, Connection) -> Connection#{user => binary(Value)};
 connection(password, Value, Connection) -> Connection#{password => password(Value)};
 connection(ssl, Value, Connection) -> Connection#{ssl => Value};
@@ -439,7 +511,11 @@ connection(queue_target, _Value, Connection) -> Connection;
 connection(queue_interval, _Value, Connection) -> Connection;
 connection(connect_timeout, Value, Connection) -> Connection#{connect_timeout => Value};
 connection(timeout, Value, Connection) -> Connection#{timeout => Value};
+connection(cancel_timeout, Value, Connection) -> Connection#{cancel_timeout => Value};
 connection(transport, Value, Connection) -> Connection#{transport => Value};
+connection(channel_binding, Value, Connection) -> Connection#{channel_binding => Value};
+connection(auth, Value, Connection) -> Connection#{auth => Value};
+connection(prepared_statements, Value, Connection) -> Connection#{prepared_statements => Value};
 connection(_Key, _Value, Connection) -> Connection.
 
 -spec password(dynamic()) -> binary() | fun(() -> binary()).

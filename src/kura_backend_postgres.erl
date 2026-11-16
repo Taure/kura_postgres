@@ -26,7 +26,8 @@ of its own; nothing here stops it.
     pool_module/0,
     driver_module/0,
     dialect/0,
-    capabilities/0
+    capabilities/0,
+    capability_model/0
 ]).
 
 -spec pool_module() -> module().
@@ -41,3 +42,7 @@ dialect() -> kura_dialect_pg.
 -doc "Forwards to `kura_pool_minato:capabilities/0`.".
 -spec capabilities() -> kura_capabilities:capability_set().
 capabilities() -> kura_pool_minato:capabilities().
+
+-doc "Forwards to `kura_pool_minato:capability_model/0`.".
+-spec capability_model() -> pos_integer().
+capability_model() -> kura_pool_minato:capability_model().
